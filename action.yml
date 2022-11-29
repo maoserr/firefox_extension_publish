@@ -2,10 +2,24 @@ name: 'Your name here'
 description: 'Provide a description here'
 author: 'Your name or organization here'
 inputs:
-  milliseconds: # change this
+  secret_name:
     required: true
-    description: 'input description here'
-    default: 'default value if applicable'
+    description: 'Name of secret that contains API key information'
+  chrome_extension_id:
+    required: false
+    description: 'Chrome Extension ID'
+  chrome_file:
+    required: false
+    description: 'Zip file for chrome extension'
+  firefox_extension_id:
+    required: false
+    description: 'Firefox Extension ID'
+  firefox_file:
+    required: false
+    description: 'Zip file for firefox extension'
+  firefox_src_file:
+    required: false
+    description: 'Zip file for firefox source upload'
 runs:
   using: 'node16'
   main: 'dist/index.js'
