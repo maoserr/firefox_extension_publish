@@ -1,91 +1,97 @@
-import got from 'got';
+import got from "got";
+import fs from "fs";
 
-const rootURI = 'https://www.googleapis.com';
-const refreshTokenURI = 'https://www.googleapis.com/oauth2/v4/token';
-const uploadExistingURI = id =>
-    `${rootURI}/upload/chromewebstore/v1.1/items/${id}`;
-const publishURI = (id, target) =>
-    `${rootURI}/chromewebstore/v1.1/items/${id}/publish?publishTarget=${target}`;
-const getURI = (id, projection) =>
-    `${rootURI}/chromewebstore/v1.1/items/${id}?projection=${projection}`;
+/**
+ * API Client for Chrome Web Store
+ */
+export class ChromeWebStore {
+    readonly extensionId: string
+    readonly clientId: string
+    readonly refreshToken: string
+    readonly clientSecret?: string
+    readonly rootURL: string = 'https://www.googleapis.com'
+    private token?: string
 
-const requiredFields = ['extensionId', 'clientId', 'refreshToken'];
 
-class APIClient {
-    constructor(options) {
-        for (const field of requiredFields) {
-            if (!options[field]) {
-                throw new Error(`Option "${field}" is required`);
-            }
+    /**
+     * Creates a new instance of the webstore
+     * @param extensionId Extension ID
+     * @param clientId Client ID
+     * @param refreshToken Refresh Token
+     * @param clientSecret (Optional) Client Secret
+     */
+    constructor(extensionId: string,
+                clientId: string,
+                refreshToken: string,
+                clientSecret?: string
+    ) {
 
-            this[field] = options[field];
-        }
+        this.extensionId = extensionId
+        this.clientId = clientId
+        this.refreshToken = refreshToken
 
-        if ('clientSecret' in options) {
-            this.clientSecret = options.clientSecret;
+        if (clientSecret) {
+            this.clientSecret = clientSecret;
         }
     }
 
-    async uploadExisting(readStream, token = this.fetchToken()) {
-        if (!readStream) {
-            throw new Error('Read stream missing');
-        }
-
-        const { extensionId } = this;
-
+    async uploadExisting(readStream: fs.ReadStream) {
+        const token = await this.checkToken()
         return got
-            .put(uploadExistingURI(extensionId), {
-                headers: this._headers(await token),
-                body: readStream,
-            })
+            .put(
+                `${this.rootURL}/upload/chromewebstore/v1.1/items/${this.extensionId}`,
+                {
+                    headers: this._headers(token),
+                    body: readStream,
+                })
             .json();
     }
 
-    async publish(target = 'default', token = this.fetchToken()) {
-        const { extensionId } = this;
-
+    async publish(target = 'default') {
+        const token = await this.checkToken()
         return got
-            .post(publishURI(extensionId, target), {
-                headers: this._headers(await token),
-            })
+            .post(
+                `${this.rootURL}/chromewebstore/v1.1/items/` +
+                `${this.extensionId}/publish?publishTarget=${target}`,
+                {
+                    headers: this._headers(token),
+                })
             .json();
     }
 
-    async get(projection = 'DRAFT', token = this.fetchToken()) {
-        const { extensionId } = this;
-
+    async get(projection = 'DRAFT') {
+        const token = await this.checkToken()
         return got
-            .get(getURI(extensionId, projection), {
-                headers: this._headers(await token),
-            })
+            .get(
+                `${this.rootURL}/chromewebstore/v1.1/items/` +
+                `${this.extensionId}?projection=${projection}`,
+                {
+                    headers: this._headers(token),
+                })
             .json();
     }
 
-    async fetchToken() {
-        const { clientId, clientSecret, refreshToken } = this;
-        const json = {
-            client_id: clientId,
-            refresh_token: refreshToken,
+    private async checkToken(): Promise<string> {
+        const refreshTokenURI = 'https://www.googleapis.com/oauth2/v4/token';
+        let json: any = {
+            client_id: this.clientId,
+            refresh_token: this.refreshToken,
             grant_type: 'refresh_token',
         };
 
-        if (clientSecret) {
-            json.client_secret = clientSecret;
+        if (this.clientSecret) {
+            json.client_secret = this.clientSecret;
         }
 
-        const response = await got.post(refreshTokenURI, { json }).json();
-
-        return response.access_token;
+        const response: any = await got.post(refreshTokenURI, {json}).json();
+        this.token = response.access_token
+        return this.token!
     }
 
-    _headers(token) {
+    private _headers(token: string) {
         return {
             Authorization: `Bearer ${token}`,
             'x-goog-api-version': '2',
         };
     }
-}
-
-export default function chromeWebstoreUpload(...args) {
-    return new APIClient(...args);
 }

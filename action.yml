@@ -2,24 +2,30 @@ name: 'Your name here'
 description: 'Provide a description here'
 author: 'Your name or organization here'
 inputs:
-  secret_name:
-    required: true
-    description: 'Name of secret that contains API key information'
   chrome_extension_id:
     required: false
-    description: 'Chrome Extension ID'
+    description: 'Required for Chrome: Extension ID. Ignore if not uploading Chrome Extension'
+  chrome_client_id:
+    required: false
+    description: 'Required for Chrome: Client ID'
+  chrome_refresh_token:
+    required: false
+    description: 'Required for Chrome: Refresh Token'
+  chrome_client_secret:
+    required: false
+    description: 'Chrome: Client Secret'
   chrome_file:
     required: false
-    description: 'Zip file for chrome extension'
+    description: 'Required for Chrome: Zip file for chrome extension'
   firefox_extension_id:
     required: false
-    description: 'Firefox Extension ID'
+    description: 'Required for Firefox: Extension ID. Ignore if not uploading Firefox Extension'
   firefox_file:
     required: false
-    description: 'Zip file for firefox extension'
+    description: 'Required for Firefox: Zip file for firefox extension'
   firefox_src_file:
     required: false
-    description: 'Zip file for firefox source upload'
+    description: 'Firefox: Zip file for source upload'
 runs:
   using: 'node16'
   main: 'dist/index.js'
