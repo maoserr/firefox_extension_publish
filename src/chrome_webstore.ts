@@ -1,4 +1,4 @@
-import got from "got";
+import {got, Response} from "got";
 import fs from "fs";
 
 /**
@@ -35,43 +35,68 @@ export class ChromeWebStore {
         }
     }
 
-    async uploadExisting(readStream: fs.ReadStream) {
-        const token = await this.checkToken()
+    /**
+     * Uploads to an existing extension
+     * @param readStream FS readStream
+     */
+    async uploadExisting(readStream: fs.ReadStream):Promise<Response> {
+        const hdr = await this.setHeaders()
         return got
             .put(
                 `${this.rootURL}/upload/chromewebstore/v1.1/items/${this.extensionId}`,
                 {
-                    headers: this._headers(token),
+                    headers: hdr,
                     body: readStream,
                 })
             .json();
     }
 
-    async publish(target = 'default') {
-        const token = await this.checkToken()
+    /**
+     * Uploads to an existing extension
+     * @param file
+     */
+    async uploadExistingFile(file: string):Promise<Response> {
+        const zipfile = fs.createReadStream(file)
+        return this.uploadExisting(zipfile)
+    }
+    /**
+     * Publish the extension
+     * @param target Target group
+     */
+    async publish(target = 'default'): Promise<Response>{
         return got
             .post(
                 `${this.rootURL}/chromewebstore/v1.1/items/` +
                 `${this.extensionId}/publish?publishTarget=${target}`,
                 {
-                    headers: this._headers(token),
+                    headers: await this.setHeaders(),
                 })
             .json();
     }
 
-    async get(projection = 'DRAFT') {
-        const token = await this.checkToken()
+    /**
+     * Gets an extension's info
+     * @param projection
+     */
+    async get(projection = 'DRAFT'):Promise<Response> {
         return got
             .get(
                 `${this.rootURL}/chromewebstore/v1.1/items/` +
                 `${this.extensionId}?projection=${projection}`,
                 {
-                    headers: this._headers(token),
+                    headers: await this.setHeaders(),
                 })
             .json();
     }
 
+    /**
+     * Check if a new token is needed
+     * @private
+     */
     private async checkToken(): Promise<string> {
+        if (this.token) {
+            return this.token!
+        }
         const refreshTokenURI = 'https://www.googleapis.com/oauth2/v4/token';
         let json: any = {
             client_id: this.clientId,
@@ -88,9 +113,14 @@ export class ChromeWebStore {
         return this.token!
     }
 
-    private _headers(token: string) {
+    /**
+     * Sets header for any API calls
+     * @private
+     */
+    private async setHeaders():Promise<any> {
+        await this.checkToken().then()
         return {
-            Authorization: `Bearer ${token}`,
+            Authorization: `Bearer ${this.token}`,
             'x-goog-api-version': '2',
         };
     }

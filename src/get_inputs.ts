@@ -6,6 +6,7 @@ export interface ChromeInputs {
     refreshToken: string
     clientSecret?: string
     file: string
+    publish: boolean
 }
 
 export interface FirefoxInputs {
@@ -29,10 +30,11 @@ export function getWebStoreInputs(): WebStoreInputs {
     if (chrome_id) {
         inp.chrome = {
             extensionId: chrome_id,
-            clientId: core.getInput(""),
-            refreshToken: core.getInput(""),
-            clientSecret: core.getInput(""),
-            file: core.getInput("")
+            clientId: core.getInput("client_id", {required: true}),
+            refreshToken: core.getInput("refresh_token", {required: true}),
+            clientSecret: core.getInput("client_secret", {required: true}),
+            file: core.getInput("file", {required: true}),
+            publish: core.getBooleanInput("publish")
         }
     }
     const ff_id = core.getInput("firefox_extension_id")

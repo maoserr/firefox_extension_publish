@@ -1,0 +1,16 @@
+name: 'WebExtPublish: Firefox'
+description: 'Web Extension Publish workflow for Firefox.'
+author: 'Mao Yu'
+inputs:
+  firefox_extension_id:
+    required: true
+    description: 'Extension ID.'
+  file:
+    required: true
+    description: 'Zip file for firefox extension'
+  src_file:
+    required: false
+    description: 'Zip file for source upload'
+runs:
+  using: 'node16'
+  main: '../dist/index.js'

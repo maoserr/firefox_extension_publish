@@ -5,7 +5,7 @@ import {getWebStoreInputs, ChromeInputs, FirefoxInputs} from "./get_inputs.js";
 
 /**
  * Runs the Chrome store logic
- * @param inp
+ * @param inp Chrome Store inputs
  */
 async function runChrome(inp: ChromeInputs): Promise<void> {
     try {
@@ -17,17 +17,12 @@ async function runChrome(inp: ChromeInputs): Promise<void> {
             inp.refreshToken,
             inp.clientSecret,
         );
-        const myZipFile = fs.createReadStream(inp.file);
-        store.uploadExisting(myZipFile).then((res: any) => {
-            core.debug(res)
-            // Response is a Resource Representation
-            // https://developer.chrome.com/webstore/webstore_api/items#resource
-        });
-        store.publish().then((res: any) => {
-            core.debug(res)
-            // Response is documented here:
-            // https://developer.chrome.com/webstore/webstore_api/items/publish
-        });
+        const chrome_res = await store.uploadExistingFile(inp.file)
+        core.info(JSON.stringify(chrome_res))
+        if (inp.publish) {
+            const publish_res = await store.publish()
+            core.info(JSON.stringify(publish_res))
+        }
     } catch (error) {
         if (error instanceof Error) core.setFailed(error.message)
     }
@@ -37,7 +32,7 @@ async function runChrome(inp: ChromeInputs): Promise<void> {
  * Runs the Firefox store logic
  * @param inp
  */
-async function runFirefox(inp:FirefoxInputs): Promise<void> {
+async function runFirefox(inp: FirefoxInputs): Promise<void> {
 
 }
 
@@ -49,9 +44,13 @@ async function run(): Promise<void> {
     const inputs = getWebStoreInputs()
     if (inputs.chrome) {
         await runChrome(inputs.chrome)
+    } else {
+        core.info("No Chrome extension ID specified, skipping Chrome...")
     }
     if (inputs.firefox) {
         await runFirefox(inputs.firefox)
+    } else {
+        core.info("No Firefox extension ID specified, skipping Firefox...")
     }
 }
 

@@ -1,0 +1,25 @@
+name: 'WebExtPublish: Chrome'
+description: 'Web Extension Publish workflow for Chrome.'
+author: 'Mao Yu'
+inputs:
+  chrome_extension_id:
+    required: true
+    description: 'Extension ID.'
+  client_id:
+    required: true
+    description: 'Client ID'
+  refresh_token:
+    required: true
+    description: 'Refresh Token'
+  client_secret:
+    required: true
+    description: 'Client Secret'
+  file:
+    required: true
+    description: 'Zip file for chrome extension'
+  publish:
+    required: false
+    description: 'Publish extension after upload'
+runs:
+  using: 'node16'
+  main: '../dist/index.js'

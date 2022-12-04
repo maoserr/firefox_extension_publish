@@ -5,6 +5,8 @@
   "description": "Publish webextension to Chrome and Firefox.",
   "main": "lib/main.js",
   "scripts": {
+    "watch": "tsc -w --sourcemap",
+    "run": "node .",
     "build": "tsc",
     "package": "ncc build --source-map --license licenses.txt",
     "test": "jest",

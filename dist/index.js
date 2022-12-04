@@ -6732,8 +6732,6 @@ var __webpack_exports__ = {};
 // This entry need to be wrapped in an IIFE because it need to be isolated against other modules in the chunk.
 (() => {
 
-// EXTERNAL MODULE: external "fs"
-var external_fs_ = __nccwpck_require__(7147);
 // EXTERNAL MODULE: ./node_modules/@actions/core/lib/core.js
 var core = __nccwpck_require__(2186);
 ;// CONCATENATED MODULE: ./node_modules/@sindresorhus/is/dist/index.js
@@ -12508,7 +12506,7 @@ const defaults = {
     mutableDefaults: false,
 };
 const got = source_create(defaults);
-/* harmony default export */ const got_dist_source = (got);
+/* harmony default export */ const got_dist_source = ((/* unused pure expression or super */ null && (got)));
 
 
 
@@ -12521,7 +12519,10 @@ const got = source_create(defaults);
 
 
 
+// EXTERNAL MODULE: external "fs"
+var external_fs_ = __nccwpck_require__(7147);
 ;// CONCATENATED MODULE: ./lib/chrome_webstore.js
+
 
 /**
  * API Client for Chrome Web Store
@@ -12548,31 +12549,56 @@ class ChromeWebStore {
             this.clientSecret = clientSecret;
         }
     }
+    /**
+     * Uploads to an existing extension
+     * @param readStream FS readStream
+     */
     async uploadExisting(readStream) {
-        const token = await this.checkToken();
-        return got_dist_source.put(`${this.rootURL}/upload/chromewebstore/v1.1/items/${this.extensionId}`, {
-            headers: this._headers(token),
+        const hdr = await this.setHeaders();
+        return got.put(`${this.rootURL}/upload/chromewebstore/v1.1/items/${this.extensionId}`, {
+            headers: hdr,
             body: readStream,
         })
             .json();
     }
+    /**
+     * Uploads to an existing extension
+     * @param file
+     */
+    async uploadExistingFile(file) {
+        const zipfile = external_fs_.createReadStream(file);
+        return this.uploadExisting(zipfile);
+    }
+    /**
+     * Publish the extension
+     * @param target Target group
+     */
     async publish(target = 'default') {
-        const token = await this.checkToken();
-        return got_dist_source.post(`${this.rootURL}/chromewebstore/v1.1/items/` +
+        return got.post(`${this.rootURL}/chromewebstore/v1.1/items/` +
             `${this.extensionId}/publish?publishTarget=${target}`, {
-            headers: this._headers(token),
+            headers: await this.setHeaders(),
         })
             .json();
     }
+    /**
+     * Gets an extension's info
+     * @param projection
+     */
     async get(projection = 'DRAFT') {
-        const token = await this.checkToken();
-        return got_dist_source.get(`${this.rootURL}/chromewebstore/v1.1/items/` +
+        return got.get(`${this.rootURL}/chromewebstore/v1.1/items/` +
             `${this.extensionId}?projection=${projection}`, {
-            headers: this._headers(token),
+            headers: await this.setHeaders(),
         })
             .json();
     }
+    /**
+     * Check if a new token is needed
+     * @private
+     */
     async checkToken() {
+        if (this.token) {
+            return this.token;
+        }
         const refreshTokenURI = 'https://www.googleapis.com/oauth2/v4/token';
         let json = {
             client_id: this.clientId,
@@ -12582,13 +12608,18 @@ class ChromeWebStore {
         if (this.clientSecret) {
             json.client_secret = this.clientSecret;
         }
-        const response = await got_dist_source.post(refreshTokenURI, { json }).json();
+        const response = await got.post(refreshTokenURI, { json }).json();
         this.token = response.access_token;
         return this.token;
     }
-    _headers(token) {
+    /**
+     * Sets header for any API calls
+     * @private
+     */
+    async setHeaders() {
+        await this.checkToken().then();
         return {
-            Authorization: `Bearer ${token}`,
+            Authorization: `Bearer ${this.token}`,
             'x-goog-api-version': '2',
         };
     }
@@ -12605,10 +12636,11 @@ function getWebStoreInputs() {
     if (chrome_id) {
         inp.chrome = {
             extensionId: chrome_id,
-            clientId: core.getInput(""),
-            refreshToken: core.getInput(""),
-            clientSecret: core.getInput(""),
-            file: core.getInput("")
+            clientId: core.getInput("client_id", { required: true }),
+            refreshToken: core.getInput("refresh_token", { required: true }),
+            clientSecret: core.getInput("client_secret", { required: true }),
+            file: core.getInput("file", { required: true }),
+            publish: core.getBooleanInput("publish")
         };
     }
     const ff_id = core.getInput("firefox_extension_id");
@@ -12627,26 +12659,20 @@ function getWebStoreInputs() {
 
 
 
-
 /**
  * Runs the Chrome store logic
- * @param inp
+ * @param inp Chrome Store inputs
  */
 async function runChrome(inp) {
     try {
         core.info(`Uploading extension ${inp.extensionId}...`);
         const store = new ChromeWebStore(inp.extensionId, inp.clientId, inp.refreshToken, inp.clientSecret);
-        const myZipFile = external_fs_.createReadStream(inp.file);
-        store.uploadExisting(myZipFile).then((res) => {
-            core.debug(res);
-            // Response is a Resource Representation
-            // https://developer.chrome.com/webstore/webstore_api/items#resource
-        });
-        store.publish().then((res) => {
-            core.debug(res);
-            // Response is documented here:
-            // https://developer.chrome.com/webstore/webstore_api/items/publish
-        });
+        const chrome_res = await store.uploadExistingFile(inp.file);
+        core.info(JSON.stringify(chrome_res));
+        if (inp.publish) {
+            const publish_res = await store.publish();
+            core.info(JSON.stringify(publish_res));
+        }
     }
     catch (error) {
         if (error instanceof Error)
@@ -12668,8 +12694,14 @@ async function run() {
     if (inputs.chrome) {
         await runChrome(inputs.chrome);
     }
+    else {
+        core.info("No Chrome extension ID specified, skipping Chrome...");
+    }
     if (inputs.firefox) {
         await runFirefox(inputs.firefox);
+    }
+    else {
+        core.info("No Firefox extension ID specified, skipping Firefox...");
     }
 }
 run().then();
