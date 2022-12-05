@@ -90,6 +90,13 @@ export class ChromeWebStore {
     }
 
     /**
+     * Clears token
+     */
+    clearToken(): void {
+        this.token = undefined
+    }
+
+    /**
      * Check if a new token is needed
      * @private
      */

@@ -9,7 +9,7 @@ import {getWebStoreInputs, ChromeInputs, FirefoxInputs} from "./get_inputs.js";
  */
 async function runChrome(inp: ChromeInputs): Promise<void> {
     try {
-        core.info(`Uploading extension ${inp.extensionId}...`)
+        core.info(`Uploading Chrome extension ${inp.extensionId}...`)
 
         const store = new ChromeWebStore(
             inp.extensionId,
@@ -33,7 +33,11 @@ async function runChrome(inp: ChromeInputs): Promise<void> {
  * @param inp
  */
 async function runFirefox(inp: FirefoxInputs): Promise<void> {
-
+    try {
+        core.info(`Uploading Firefox extension ${inp.extensionId}...`)
+    } catch (error) {
+        if (error instanceof Error) core.setFailed(error.message)
+    }
 }
 
 /**

@@ -19,6 +19,7 @@ inputs:
     description: 'Zip file for chrome extension'
   publish:
     required: false
+    default: "true"
     description: 'Publish extension after upload'
 runs:
   using: 'node16'
