@@ -1,4 +1,3 @@
-import * as fs from 'fs';
 import * as core from '@actions/core'
 import {ChromeWebStore} from "./chrome_webstore.js";
 import {getWebStoreInputs, ChromeInputs, FirefoxInputs} from "./get_inputs.js";
