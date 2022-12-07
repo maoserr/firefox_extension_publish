@@ -1,4 +1,4 @@
-import {sign} from "jsonwebtoken";
+import jwt from "jsonwebtoken";
 import fs from "fs";
 import fetch from "node-fetch";
 import FormData from "form-data"
@@ -148,7 +148,7 @@ export class MozillaWebStore {
             exp: issuedAt + 60
         };
 
-        return sign(payload, this.apiSecret, {
+        return jwt.sign(payload, this.apiSecret, {
             algorithm: "HS256"  // HMAC-SHA256 signing algorithm
         });
     }

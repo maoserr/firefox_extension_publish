@@ -1752,3918 +1752,6435 @@ exports.checkBypass = checkBypass;
 
 /***/ }),
 
-/***/ 2391:
+/***/ 4812:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
-
-const {Transform, PassThrough} = __nccwpck_require__(2781);
-const zlib = __nccwpck_require__(9796);
-const mimicResponse = __nccwpck_require__(3877);
-
-module.exports = response => {
-	const contentEncoding = (response.headers['content-encoding'] || '').toLowerCase();
-
-	if (!['gzip', 'deflate', 'br'].includes(contentEncoding)) {
-		return response;
-	}
-
-	// TODO: Remove this when targeting Node.js 12.
-	const isBrotli = contentEncoding === 'br';
-	if (isBrotli && typeof zlib.createBrotliDecompress !== 'function') {
-		response.destroy(new Error('Brotli is not supported on Node.js < 12'));
-		return response;
-	}
-
-	let isEmpty = true;
-
-	const checker = new Transform({
-		transform(data, _encoding, callback) {
-			isEmpty = false;
-
-			callback(null, data);
-		},
-
-		flush(callback) {
-			callback();
-		}
-	});
-
-	const finalStream = new PassThrough({
-		autoDestroy: false,
-		destroy(error, callback) {
-			response.destroy();
-
-			callback(error);
-		}
-	});
-
-	const decompressStream = isBrotli ? zlib.createBrotliDecompress() : zlib.createUnzip();
-
-	decompressStream.once('error', error => {
-		if (isEmpty && !response.readable) {
-			finalStream.end();
-			return;
-		}
-
-		finalStream.destroy(error);
-	});
-
-	mimicResponse(response, finalStream);
-	response.pipe(checker).pipe(decompressStream).pipe(finalStream);
-
-	return finalStream;
+module.exports =
+{
+  parallel      : __nccwpck_require__(8210),
+  serial        : __nccwpck_require__(445),
+  serialOrdered : __nccwpck_require__(3578)
 };
 
 
 /***/ }),
 
-/***/ 3877:
+/***/ 1700:
+/***/ ((module) => {
+
+// API
+module.exports = abort;
+
+/**
+ * Aborts leftover active jobs
+ *
+ * @param {object} state - current state object
+ */
+function abort(state)
+{
+  Object.keys(state.jobs).forEach(clean.bind(state));
+
+  // reset leftover jobs
+  state.jobs = {};
+}
+
+/**
+ * Cleans up leftover job by invoking abort function for the provided job id
+ *
+ * @this  state
+ * @param {string|number} key - job id to abort
+ */
+function clean(key)
+{
+  if (typeof this.jobs[key] == 'function')
+  {
+    this.jobs[key]();
+  }
+}
+
+
+/***/ }),
+
+/***/ 2794:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+var defer = __nccwpck_require__(5295);
+
+// API
+module.exports = async;
+
+/**
+ * Runs provided callback asynchronously
+ * even if callback itself is not
+ *
+ * @param   {function} callback - callback to invoke
+ * @returns {function} - augmented callback
+ */
+function async(callback)
+{
+  var isAsync = false;
+
+  // check if async happened
+  defer(function() { isAsync = true; });
+
+  return function async_callback(err, result)
+  {
+    if (isAsync)
+    {
+      callback(err, result);
+    }
+    else
+    {
+      defer(function nextTick_callback()
+      {
+        callback(err, result);
+      });
+    }
+  };
+}
+
+
+/***/ }),
+
+/***/ 5295:
+/***/ ((module) => {
+
+module.exports = defer;
+
+/**
+ * Runs provided function on next iteration of the event loop
+ *
+ * @param {function} fn - function to run
+ */
+function defer(fn)
+{
+  var nextTick = typeof setImmediate == 'function'
+    ? setImmediate
+    : (
+      typeof process == 'object' && typeof process.nextTick == 'function'
+      ? process.nextTick
+      : null
+    );
+
+  if (nextTick)
+  {
+    nextTick(fn);
+  }
+  else
+  {
+    setTimeout(fn, 0);
+  }
+}
+
+
+/***/ }),
+
+/***/ 9023:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+var async = __nccwpck_require__(2794)
+  , abort = __nccwpck_require__(1700)
+  ;
+
+// API
+module.exports = iterate;
+
+/**
+ * Iterates over each job object
+ *
+ * @param {array|object} list - array or object (named list) to iterate over
+ * @param {function} iterator - iterator to run
+ * @param {object} state - current job status
+ * @param {function} callback - invoked when all elements processed
+ */
+function iterate(list, iterator, state, callback)
+{
+  // store current index
+  var key = state['keyedList'] ? state['keyedList'][state.index] : state.index;
+
+  state.jobs[key] = runJob(iterator, key, list[key], function(error, output)
+  {
+    // don't repeat yourself
+    // skip secondary callbacks
+    if (!(key in state.jobs))
+    {
+      return;
+    }
+
+    // clean up jobs
+    delete state.jobs[key];
+
+    if (error)
+    {
+      // don't process rest of the results
+      // stop still active jobs
+      // and reset the list
+      abort(state);
+    }
+    else
+    {
+      state.results[key] = output;
+    }
+
+    // return salvaged results
+    callback(error, state.results);
+  });
+}
+
+/**
+ * Runs iterator over provided job element
+ *
+ * @param   {function} iterator - iterator to invoke
+ * @param   {string|number} key - key/index of the element in the list of jobs
+ * @param   {mixed} item - job description
+ * @param   {function} callback - invoked after iterator is done with the job
+ * @returns {function|mixed} - job abort function or something else
+ */
+function runJob(iterator, key, item, callback)
+{
+  var aborter;
+
+  // allow shortcut if iterator expects only two arguments
+  if (iterator.length == 2)
+  {
+    aborter = iterator(item, async(callback));
+  }
+  // otherwise go with full three arguments
+  else
+  {
+    aborter = iterator(item, key, async(callback));
+  }
+
+  return aborter;
+}
+
+
+/***/ }),
+
+/***/ 2474:
+/***/ ((module) => {
+
+// API
+module.exports = state;
+
+/**
+ * Creates initial state object
+ * for iteration over list
+ *
+ * @param   {array|object} list - list to iterate over
+ * @param   {function|null} sortMethod - function to use for keys sort,
+ *                                     or `null` to keep them as is
+ * @returns {object} - initial state object
+ */
+function state(list, sortMethod)
+{
+  var isNamedList = !Array.isArray(list)
+    , initState =
+    {
+      index    : 0,
+      keyedList: isNamedList || sortMethod ? Object.keys(list) : null,
+      jobs     : {},
+      results  : isNamedList ? {} : [],
+      size     : isNamedList ? Object.keys(list).length : list.length
+    }
+    ;
+
+  if (sortMethod)
+  {
+    // sort array keys based on it's values
+    // sort object's keys just on own merit
+    initState.keyedList.sort(isNamedList ? sortMethod : function(a, b)
+    {
+      return sortMethod(list[a], list[b]);
+    });
+  }
+
+  return initState;
+}
+
+
+/***/ }),
+
+/***/ 7942:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+var abort = __nccwpck_require__(1700)
+  , async = __nccwpck_require__(2794)
+  ;
+
+// API
+module.exports = terminator;
+
+/**
+ * Terminates jobs in the attached state context
+ *
+ * @this  AsyncKitState#
+ * @param {function} callback - final callback to invoke after termination
+ */
+function terminator(callback)
+{
+  if (!Object.keys(this.jobs).length)
+  {
+    return;
+  }
+
+  // fast forward iteration index
+  this.index = this.size;
+
+  // abort jobs
+  abort(this);
+
+  // send back results we have so far
+  async(callback)(null, this.results);
+}
+
+
+/***/ }),
+
+/***/ 8210:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+var iterate    = __nccwpck_require__(9023)
+  , initState  = __nccwpck_require__(2474)
+  , terminator = __nccwpck_require__(7942)
+  ;
+
+// Public API
+module.exports = parallel;
+
+/**
+ * Runs iterator over provided array elements in parallel
+ *
+ * @param   {array|object} list - array or object (named list) to iterate over
+ * @param   {function} iterator - iterator to run
+ * @param   {function} callback - invoked when all elements processed
+ * @returns {function} - jobs terminator
+ */
+function parallel(list, iterator, callback)
+{
+  var state = initState(list);
+
+  while (state.index < (state['keyedList'] || list).length)
+  {
+    iterate(list, iterator, state, function(error, result)
+    {
+      if (error)
+      {
+        callback(error, result);
+        return;
+      }
+
+      // looks like it's the last one
+      if (Object.keys(state.jobs).length === 0)
+      {
+        callback(null, state.results);
+        return;
+      }
+    });
+
+    state.index++;
+  }
+
+  return terminator.bind(state, callback);
+}
+
+
+/***/ }),
+
+/***/ 445:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+var serialOrdered = __nccwpck_require__(3578);
+
+// Public API
+module.exports = serial;
+
+/**
+ * Runs iterator over provided array elements in series
+ *
+ * @param   {array|object} list - array or object (named list) to iterate over
+ * @param   {function} iterator - iterator to run
+ * @param   {function} callback - invoked when all elements processed
+ * @returns {function} - jobs terminator
+ */
+function serial(list, iterator, callback)
+{
+  return serialOrdered(list, iterator, null, callback);
+}
+
+
+/***/ }),
+
+/***/ 3578:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+var iterate    = __nccwpck_require__(9023)
+  , initState  = __nccwpck_require__(2474)
+  , terminator = __nccwpck_require__(7942)
+  ;
+
+// Public API
+module.exports = serialOrdered;
+// sorting helpers
+module.exports.ascending  = ascending;
+module.exports.descending = descending;
+
+/**
+ * Runs iterator over provided sorted array elements in series
+ *
+ * @param   {array|object} list - array or object (named list) to iterate over
+ * @param   {function} iterator - iterator to run
+ * @param   {function} sortMethod - custom sort function
+ * @param   {function} callback - invoked when all elements processed
+ * @returns {function} - jobs terminator
+ */
+function serialOrdered(list, iterator, sortMethod, callback)
+{
+  var state = initState(list, sortMethod);
+
+  iterate(list, iterator, state, function iteratorHandler(error, result)
+  {
+    if (error)
+    {
+      callback(error, result);
+      return;
+    }
+
+    state.index++;
+
+    // are we there yet?
+    if (state.index < (state['keyedList'] || list).length)
+    {
+      iterate(list, iterator, state, iteratorHandler);
+      return;
+    }
+
+    // done here
+    callback(null, state.results);
+  });
+
+  return terminator.bind(state, callback);
+}
+
+/*
+ * -- Sort methods
+ */
+
+/**
+ * sort helper to sort array elements in ascending order
+ *
+ * @param   {mixed} a - an item to compare
+ * @param   {mixed} b - an item to compare
+ * @returns {number} - comparison result
+ */
+function ascending(a, b)
+{
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/**
+ * sort helper to sort array elements in descending order
+ *
+ * @param   {mixed} a - an item to compare
+ * @param   {mixed} b - an item to compare
+ * @returns {number} - comparison result
+ */
+function descending(a, b)
+{
+  return -1 * ascending(a, b);
+}
+
+
+/***/ }),
+
+/***/ 9239:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+/*jshint node:true */
+
+var Buffer = (__nccwpck_require__(4300).Buffer); // browserify
+var SlowBuffer = (__nccwpck_require__(4300).SlowBuffer);
+
+module.exports = bufferEq;
+
+function bufferEq(a, b) {
+
+  // shortcutting on type is necessary for correctness
+  if (!Buffer.isBuffer(a) || !Buffer.isBuffer(b)) {
+    return false;
+  }
+
+  // buffer sizes should be well-known information, so despite this
+  // shortcutting, it doesn't leak any information about the *contents* of the
+  // buffers.
+  if (a.length !== b.length) {
+    return false;
+  }
+
+  var c = 0;
+  for (var i = 0; i < a.length; i++) {
+    /*jshint bitwise:false */
+    c |= a[i] ^ b[i]; // XOR
+  }
+  return c === 0;
+}
+
+bufferEq.install = function() {
+  Buffer.prototype.equal = SlowBuffer.prototype.equal = function equal(that) {
+    return bufferEq(this, that);
+  };
+};
+
+var origBufEqual = Buffer.prototype.equal;
+var origSlowBufEqual = SlowBuffer.prototype.equal;
+bufferEq.restore = function() {
+  Buffer.prototype.equal = origBufEqual;
+  SlowBuffer.prototype.equal = origSlowBufEqual;
+};
+
+
+/***/ }),
+
+/***/ 5443:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+var util = __nccwpck_require__(3837);
+var Stream = (__nccwpck_require__(2781).Stream);
+var DelayedStream = __nccwpck_require__(8611);
+
+module.exports = CombinedStream;
+function CombinedStream() {
+  this.writable = false;
+  this.readable = true;
+  this.dataSize = 0;
+  this.maxDataSize = 2 * 1024 * 1024;
+  this.pauseStreams = true;
+
+  this._released = false;
+  this._streams = [];
+  this._currentStream = null;
+  this._insideLoop = false;
+  this._pendingNext = false;
+}
+util.inherits(CombinedStream, Stream);
+
+CombinedStream.create = function(options) {
+  var combinedStream = new this();
+
+  options = options || {};
+  for (var option in options) {
+    combinedStream[option] = options[option];
+  }
+
+  return combinedStream;
+};
+
+CombinedStream.isStreamLike = function(stream) {
+  return (typeof stream !== 'function')
+    && (typeof stream !== 'string')
+    && (typeof stream !== 'boolean')
+    && (typeof stream !== 'number')
+    && (!Buffer.isBuffer(stream));
+};
+
+CombinedStream.prototype.append = function(stream) {
+  var isStreamLike = CombinedStream.isStreamLike(stream);
+
+  if (isStreamLike) {
+    if (!(stream instanceof DelayedStream)) {
+      var newStream = DelayedStream.create(stream, {
+        maxDataSize: Infinity,
+        pauseStream: this.pauseStreams,
+      });
+      stream.on('data', this._checkDataSize.bind(this));
+      stream = newStream;
+    }
+
+    this._handleErrors(stream);
+
+    if (this.pauseStreams) {
+      stream.pause();
+    }
+  }
+
+  this._streams.push(stream);
+  return this;
+};
+
+CombinedStream.prototype.pipe = function(dest, options) {
+  Stream.prototype.pipe.call(this, dest, options);
+  this.resume();
+  return dest;
+};
+
+CombinedStream.prototype._getNext = function() {
+  this._currentStream = null;
+
+  if (this._insideLoop) {
+    this._pendingNext = true;
+    return; // defer call
+  }
+
+  this._insideLoop = true;
+  try {
+    do {
+      this._pendingNext = false;
+      this._realGetNext();
+    } while (this._pendingNext);
+  } finally {
+    this._insideLoop = false;
+  }
+};
+
+CombinedStream.prototype._realGetNext = function() {
+  var stream = this._streams.shift();
+
+
+  if (typeof stream == 'undefined') {
+    this.end();
+    return;
+  }
+
+  if (typeof stream !== 'function') {
+    this._pipeNext(stream);
+    return;
+  }
+
+  var getStream = stream;
+  getStream(function(stream) {
+    var isStreamLike = CombinedStream.isStreamLike(stream);
+    if (isStreamLike) {
+      stream.on('data', this._checkDataSize.bind(this));
+      this._handleErrors(stream);
+    }
+
+    this._pipeNext(stream);
+  }.bind(this));
+};
+
+CombinedStream.prototype._pipeNext = function(stream) {
+  this._currentStream = stream;
+
+  var isStreamLike = CombinedStream.isStreamLike(stream);
+  if (isStreamLike) {
+    stream.on('end', this._getNext.bind(this));
+    stream.pipe(this, {end: false});
+    return;
+  }
+
+  var value = stream;
+  this.write(value);
+  this._getNext();
+};
+
+CombinedStream.prototype._handleErrors = function(stream) {
+  var self = this;
+  stream.on('error', function(err) {
+    self._emitError(err);
+  });
+};
+
+CombinedStream.prototype.write = function(data) {
+  this.emit('data', data);
+};
+
+CombinedStream.prototype.pause = function() {
+  if (!this.pauseStreams) {
+    return;
+  }
+
+  if(this.pauseStreams && this._currentStream && typeof(this._currentStream.pause) == 'function') this._currentStream.pause();
+  this.emit('pause');
+};
+
+CombinedStream.prototype.resume = function() {
+  if (!this._released) {
+    this._released = true;
+    this.writable = true;
+    this._getNext();
+  }
+
+  if(this.pauseStreams && this._currentStream && typeof(this._currentStream.resume) == 'function') this._currentStream.resume();
+  this.emit('resume');
+};
+
+CombinedStream.prototype.end = function() {
+  this._reset();
+  this.emit('end');
+};
+
+CombinedStream.prototype.destroy = function() {
+  this._reset();
+  this.emit('close');
+};
+
+CombinedStream.prototype._reset = function() {
+  this.writable = false;
+  this._streams = [];
+  this._currentStream = null;
+};
+
+CombinedStream.prototype._checkDataSize = function() {
+  this._updateDataSize();
+  if (this.dataSize <= this.maxDataSize) {
+    return;
+  }
+
+  var message =
+    'DelayedStream#maxDataSize of ' + this.maxDataSize + ' bytes exceeded.';
+  this._emitError(new Error(message));
+};
+
+CombinedStream.prototype._updateDataSize = function() {
+  this.dataSize = 0;
+
+  var self = this;
+  this._streams.forEach(function(stream) {
+    if (!stream.dataSize) {
+      return;
+    }
+
+    self.dataSize += stream.dataSize;
+  });
+
+  if (this._currentStream && this._currentStream.dataSize) {
+    this.dataSize += this._currentStream.dataSize;
+  }
+};
+
+CombinedStream.prototype._emitError = function(err) {
+  this._reset();
+  this.emit('error', err);
+};
+
+
+/***/ }),
+
+/***/ 8611:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+var Stream = (__nccwpck_require__(2781).Stream);
+var util = __nccwpck_require__(3837);
+
+module.exports = DelayedStream;
+function DelayedStream() {
+  this.source = null;
+  this.dataSize = 0;
+  this.maxDataSize = 1024 * 1024;
+  this.pauseStream = true;
+
+  this._maxDataSizeExceeded = false;
+  this._released = false;
+  this._bufferedEvents = [];
+}
+util.inherits(DelayedStream, Stream);
+
+DelayedStream.create = function(source, options) {
+  var delayedStream = new this();
+
+  options = options || {};
+  for (var option in options) {
+    delayedStream[option] = options[option];
+  }
+
+  delayedStream.source = source;
+
+  var realEmit = source.emit;
+  source.emit = function() {
+    delayedStream._handleEmit(arguments);
+    return realEmit.apply(source, arguments);
+  };
+
+  source.on('error', function() {});
+  if (delayedStream.pauseStream) {
+    source.pause();
+  }
+
+  return delayedStream;
+};
+
+Object.defineProperty(DelayedStream.prototype, 'readable', {
+  configurable: true,
+  enumerable: true,
+  get: function() {
+    return this.source.readable;
+  }
+});
+
+DelayedStream.prototype.setEncoding = function() {
+  return this.source.setEncoding.apply(this.source, arguments);
+};
+
+DelayedStream.prototype.resume = function() {
+  if (!this._released) {
+    this.release();
+  }
+
+  this.source.resume();
+};
+
+DelayedStream.prototype.pause = function() {
+  this.source.pause();
+};
+
+DelayedStream.prototype.release = function() {
+  this._released = true;
+
+  this._bufferedEvents.forEach(function(args) {
+    this.emit.apply(this, args);
+  }.bind(this));
+  this._bufferedEvents = [];
+};
+
+DelayedStream.prototype.pipe = function() {
+  var r = Stream.prototype.pipe.apply(this, arguments);
+  this.resume();
+  return r;
+};
+
+DelayedStream.prototype._handleEmit = function(args) {
+  if (this._released) {
+    this.emit.apply(this, args);
+    return;
+  }
+
+  if (args[0] === 'data') {
+    this.dataSize += args[1].length;
+    this._checkIfMaxDataSizeExceeded();
+  }
+
+  this._bufferedEvents.push(args);
+};
+
+DelayedStream.prototype._checkIfMaxDataSizeExceeded = function() {
+  if (this._maxDataSizeExceeded) {
+    return;
+  }
+
+  if (this.dataSize <= this.maxDataSize) {
+    return;
+  }
+
+  this._maxDataSizeExceeded = true;
+  var message =
+    'DelayedStream#maxDataSize of ' + this.maxDataSize + ' bytes exceeded.'
+  this.emit('error', new Error(message));
+};
+
+
+/***/ }),
+
+/***/ 1728:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+
+
+var Buffer = (__nccwpck_require__(1867).Buffer);
+
+var getParamBytesForAlg = __nccwpck_require__(528);
+
+var MAX_OCTET = 0x80,
+	CLASS_UNIVERSAL = 0,
+	PRIMITIVE_BIT = 0x20,
+	TAG_SEQ = 0x10,
+	TAG_INT = 0x02,
+	ENCODED_TAG_SEQ = (TAG_SEQ | PRIMITIVE_BIT) | (CLASS_UNIVERSAL << 6),
+	ENCODED_TAG_INT = TAG_INT | (CLASS_UNIVERSAL << 6);
+
+function base64Url(base64) {
+	return base64
+		.replace(/=/g, '')
+		.replace(/\+/g, '-')
+		.replace(/\//g, '_');
+}
+
+function signatureAsBuffer(signature) {
+	if (Buffer.isBuffer(signature)) {
+		return signature;
+	} else if ('string' === typeof signature) {
+		return Buffer.from(signature, 'base64');
+	}
+
+	throw new TypeError('ECDSA signature must be a Base64 string or a Buffer');
+}
+
+function derToJose(signature, alg) {
+	signature = signatureAsBuffer(signature);
+	var paramBytes = getParamBytesForAlg(alg);
+
+	// the DER encoded param should at most be the param size, plus a padding
+	// zero, since due to being a signed integer
+	var maxEncodedParamLength = paramBytes + 1;
+
+	var inputLength = signature.length;
+
+	var offset = 0;
+	if (signature[offset++] !== ENCODED_TAG_SEQ) {
+		throw new Error('Could not find expected "seq"');
+	}
+
+	var seqLength = signature[offset++];
+	if (seqLength === (MAX_OCTET | 1)) {
+		seqLength = signature[offset++];
+	}
+
+	if (inputLength - offset < seqLength) {
+		throw new Error('"seq" specified length of "' + seqLength + '", only "' + (inputLength - offset) + '" remaining');
+	}
+
+	if (signature[offset++] !== ENCODED_TAG_INT) {
+		throw new Error('Could not find expected "int" for "r"');
+	}
+
+	var rLength = signature[offset++];
+
+	if (inputLength - offset - 2 < rLength) {
+		throw new Error('"r" specified length of "' + rLength + '", only "' + (inputLength - offset - 2) + '" available');
+	}
+
+	if (maxEncodedParamLength < rLength) {
+		throw new Error('"r" specified length of "' + rLength + '", max of "' + maxEncodedParamLength + '" is acceptable');
+	}
+
+	var rOffset = offset;
+	offset += rLength;
+
+	if (signature[offset++] !== ENCODED_TAG_INT) {
+		throw new Error('Could not find expected "int" for "s"');
+	}
+
+	var sLength = signature[offset++];
+
+	if (inputLength - offset !== sLength) {
+		throw new Error('"s" specified length of "' + sLength + '", expected "' + (inputLength - offset) + '"');
+	}
+
+	if (maxEncodedParamLength < sLength) {
+		throw new Error('"s" specified length of "' + sLength + '", max of "' + maxEncodedParamLength + '" is acceptable');
+	}
+
+	var sOffset = offset;
+	offset += sLength;
+
+	if (offset !== inputLength) {
+		throw new Error('Expected to consume entire buffer, but "' + (inputLength - offset) + '" bytes remain');
+	}
+
+	var rPadding = paramBytes - rLength,
+		sPadding = paramBytes - sLength;
+
+	var dst = Buffer.allocUnsafe(rPadding + rLength + sPadding + sLength);
+
+	for (offset = 0; offset < rPadding; ++offset) {
+		dst[offset] = 0;
+	}
+	signature.copy(dst, offset, rOffset + Math.max(-rPadding, 0), rOffset + rLength);
+
+	offset = paramBytes;
+
+	for (var o = offset; offset < o + sPadding; ++offset) {
+		dst[offset] = 0;
+	}
+	signature.copy(dst, offset, sOffset + Math.max(-sPadding, 0), sOffset + sLength);
+
+	dst = dst.toString('base64');
+	dst = base64Url(dst);
+
+	return dst;
+}
+
+function countPadding(buf, start, stop) {
+	var padding = 0;
+	while (start + padding < stop && buf[start + padding] === 0) {
+		++padding;
+	}
+
+	var needsSign = buf[start + padding] >= MAX_OCTET;
+	if (needsSign) {
+		--padding;
+	}
+
+	return padding;
+}
+
+function joseToDer(signature, alg) {
+	signature = signatureAsBuffer(signature);
+	var paramBytes = getParamBytesForAlg(alg);
+
+	var signatureBytes = signature.length;
+	if (signatureBytes !== paramBytes * 2) {
+		throw new TypeError('"' + alg + '" signatures must be "' + paramBytes * 2 + '" bytes, saw "' + signatureBytes + '"');
+	}
+
+	var rPadding = countPadding(signature, 0, paramBytes);
+	var sPadding = countPadding(signature, paramBytes, signature.length);
+	var rLength = paramBytes - rPadding;
+	var sLength = paramBytes - sPadding;
+
+	var rsBytes = 1 + 1 + rLength + 1 + 1 + sLength;
+
+	var shortLength = rsBytes < MAX_OCTET;
+
+	var dst = Buffer.allocUnsafe((shortLength ? 2 : 3) + rsBytes);
+
+	var offset = 0;
+	dst[offset++] = ENCODED_TAG_SEQ;
+	if (shortLength) {
+		// Bit 8 has value "0"
+		// bits 7-1 give the length.
+		dst[offset++] = rsBytes;
+	} else {
+		// Bit 8 of first octet has value "1"
+		// bits 7-1 give the number of additional length octets.
+		dst[offset++] = MAX_OCTET	| 1;
+		// length, base 256
+		dst[offset++] = rsBytes & 0xff;
+	}
+	dst[offset++] = ENCODED_TAG_INT;
+	dst[offset++] = rLength;
+	if (rPadding < 0) {
+		dst[offset++] = 0;
+		offset += signature.copy(dst, offset, 0, paramBytes);
+	} else {
+		offset += signature.copy(dst, offset, rPadding, paramBytes);
+	}
+	dst[offset++] = ENCODED_TAG_INT;
+	dst[offset++] = sLength;
+	if (sPadding < 0) {
+		dst[offset++] = 0;
+		signature.copy(dst, offset, paramBytes);
+	} else {
+		signature.copy(dst, offset, paramBytes + sPadding);
+	}
+
+	return dst;
+}
+
+module.exports = {
+	derToJose: derToJose,
+	joseToDer: joseToDer
+};
+
+
+/***/ }),
+
+/***/ 528:
 /***/ ((module) => {
 
 
 
-// We define these manually to ensure they're always copied
-// even if they would move up the prototype chain
-// https://nodejs.org/api/http.html#http_class_http_incomingmessage
-const knownProperties = [
-	'aborted',
-	'complete',
-	'headers',
-	'httpVersion',
-	'httpVersionMinor',
-	'httpVersionMajor',
-	'method',
-	'rawHeaders',
-	'rawTrailers',
-	'setTimeout',
-	'socket',
-	'statusCode',
-	'statusMessage',
-	'trailers',
-	'url'
-];
+function getParamSize(keySize) {
+	var result = ((keySize / 8) | 0) + (keySize % 8 === 0 ? 0 : 1);
+	return result;
+}
 
-module.exports = (fromStream, toStream) => {
-	if (toStream._readableState.autoDestroy) {
-		throw new Error('The second stream must have the `autoDestroy` option set to `false`');
+var paramBytesForAlg = {
+	ES256: getParamSize(256),
+	ES384: getParamSize(384),
+	ES512: getParamSize(521)
+};
+
+function getParamBytesForAlg(alg) {
+	var paramBytes = paramBytesForAlg[alg];
+	if (paramBytes) {
+		return paramBytes;
 	}
 
-	const fromProperties = new Set(Object.keys(fromStream).concat(knownProperties));
+	throw new Error('Unknown algorithm "' + alg + '"');
+}
 
-	const properties = {};
+module.exports = getParamBytesForAlg;
 
-	for (const property of fromProperties) {
-		// Don't overwrite existing properties.
-		if (property in toStream) {
-			continue;
-		}
 
-		properties[property] = {
-			get() {
-				const value = fromStream[property];
-				const isFunction = typeof value === 'function';
+/***/ }),
 
-				return isFunction ? value.bind(fromStream) : value;
-			},
-			set(value) {
-				fromStream[property] = value;
-			},
-			enumerable: true,
-			configurable: false
-		};
-	}
+/***/ 4334:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
-	Object.defineProperties(toStream, properties);
+var CombinedStream = __nccwpck_require__(5443);
+var util = __nccwpck_require__(3837);
+var path = __nccwpck_require__(1017);
+var http = __nccwpck_require__(3685);
+var https = __nccwpck_require__(5687);
+var parseUrl = (__nccwpck_require__(7310).parse);
+var fs = __nccwpck_require__(7147);
+var mime = __nccwpck_require__(3583);
+var asynckit = __nccwpck_require__(4812);
+var populate = __nccwpck_require__(7142);
 
-	fromStream.once('aborted', () => {
-		toStream.destroy();
+// Public API
+module.exports = FormData;
 
-		toStream.emit('aborted');
-	});
+// make it a Stream
+util.inherits(FormData, CombinedStream);
 
-	fromStream.once('close', () => {
-		if (fromStream.complete) {
-			if (toStream.readable) {
-				toStream.once('end', () => {
-					toStream.emit('close');
-				});
-			} else {
-				toStream.emit('close');
-			}
-		} else {
-			toStream.emit('close');
-		}
-	});
+/**
+ * Create readable "multipart/form-data" streams.
+ * Can be used to submit forms
+ * and file uploads to other web applications.
+ *
+ * @constructor
+ * @param {Object} options - Properties to be added/overriden for FormData and CombinedStream
+ */
+function FormData(options) {
+  if (!(this instanceof FormData)) {
+    return new FormData(options);
+  }
 
-	return toStream;
+  this._overheadLength = 0;
+  this._valueLength = 0;
+  this._valuesToMeasure = [];
+
+  CombinedStream.call(this);
+
+  options = options || {};
+  for (var option in options) {
+    this[option] = options[option];
+  }
+}
+
+FormData.LINE_BREAK = '\r\n';
+FormData.DEFAULT_CONTENT_TYPE = 'application/octet-stream';
+
+FormData.prototype.append = function(field, value, options) {
+
+  options = options || {};
+
+  // allow filename as single option
+  if (typeof options == 'string') {
+    options = {filename: options};
+  }
+
+  var append = CombinedStream.prototype.append.bind(this);
+
+  // all that streamy business can't handle numbers
+  if (typeof value == 'number') {
+    value = '' + value;
+  }
+
+  // https://github.com/felixge/node-form-data/issues/38
+  if (util.isArray(value)) {
+    // Please convert your array into string
+    // the way web server expects it
+    this._error(new Error('Arrays are not supported.'));
+    return;
+  }
+
+  var header = this._multiPartHeader(field, value, options);
+  var footer = this._multiPartFooter();
+
+  append(header);
+  append(value);
+  append(footer);
+
+  // pass along options.knownLength
+  this._trackLength(header, value, options);
+};
+
+FormData.prototype._trackLength = function(header, value, options) {
+  var valueLength = 0;
+
+  // used w/ getLengthSync(), when length is known.
+  // e.g. for streaming directly from a remote server,
+  // w/ a known file a size, and not wanting to wait for
+  // incoming file to finish to get its size.
+  if (options.knownLength != null) {
+    valueLength += +options.knownLength;
+  } else if (Buffer.isBuffer(value)) {
+    valueLength = value.length;
+  } else if (typeof value === 'string') {
+    valueLength = Buffer.byteLength(value);
+  }
+
+  this._valueLength += valueLength;
+
+  // @check why add CRLF? does this account for custom/multiple CRLFs?
+  this._overheadLength +=
+    Buffer.byteLength(header) +
+    FormData.LINE_BREAK.length;
+
+  // empty or either doesn't have path or not an http response
+  if (!value || ( !value.path && !(value.readable && value.hasOwnProperty('httpVersion')) )) {
+    return;
+  }
+
+  // no need to bother with the length
+  if (!options.knownLength) {
+    this._valuesToMeasure.push(value);
+  }
+};
+
+FormData.prototype._lengthRetriever = function(value, callback) {
+
+  if (value.hasOwnProperty('fd')) {
+
+    // take read range into a account
+    // `end` = Infinity –> read file till the end
+    //
+    // TODO: Looks like there is bug in Node fs.createReadStream
+    // it doesn't respect `end` options without `start` options
+    // Fix it when node fixes it.
+    // https://github.com/joyent/node/issues/7819
+    if (value.end != undefined && value.end != Infinity && value.start != undefined) {
+
+      // when end specified
+      // no need to calculate range
+      // inclusive, starts with 0
+      callback(null, value.end + 1 - (value.start ? value.start : 0));
+
+    // not that fast snoopy
+    } else {
+      // still need to fetch file size from fs
+      fs.stat(value.path, function(err, stat) {
+
+        var fileSize;
+
+        if (err) {
+          callback(err);
+          return;
+        }
+
+        // update final size based on the range options
+        fileSize = stat.size - (value.start ? value.start : 0);
+        callback(null, fileSize);
+      });
+    }
+
+  // or http response
+  } else if (value.hasOwnProperty('httpVersion')) {
+    callback(null, +value.headers['content-length']);
+
+  // or request stream http://github.com/mikeal/request
+  } else if (value.hasOwnProperty('httpModule')) {
+    // wait till response come back
+    value.on('response', function(response) {
+      value.pause();
+      callback(null, +response.headers['content-length']);
+    });
+    value.resume();
+
+  // something else
+  } else {
+    callback('Unknown stream');
+  }
+};
+
+FormData.prototype._multiPartHeader = function(field, value, options) {
+  // custom header specified (as string)?
+  // it becomes responsible for boundary
+  // (e.g. to handle extra CRLFs on .NET servers)
+  if (typeof options.header == 'string') {
+    return options.header;
+  }
+
+  var contentDisposition = this._getContentDisposition(value, options);
+  var contentType = this._getContentType(value, options);
+
+  var contents = '';
+  var headers  = {
+    // add custom disposition as third element or keep it two elements if not
+    'Content-Disposition': ['form-data', 'name="' + field + '"'].concat(contentDisposition || []),
+    // if no content type. allow it to be empty array
+    'Content-Type': [].concat(contentType || [])
+  };
+
+  // allow custom headers.
+  if (typeof options.header == 'object') {
+    populate(headers, options.header);
+  }
+
+  var header;
+  for (var prop in headers) {
+    if (!headers.hasOwnProperty(prop)) continue;
+    header = headers[prop];
+
+    // skip nullish headers.
+    if (header == null) {
+      continue;
+    }
+
+    // convert all headers to arrays.
+    if (!Array.isArray(header)) {
+      header = [header];
+    }
+
+    // add non-empty headers.
+    if (header.length) {
+      contents += prop + ': ' + header.join('; ') + FormData.LINE_BREAK;
+    }
+  }
+
+  return '--' + this.getBoundary() + FormData.LINE_BREAK + contents + FormData.LINE_BREAK;
+};
+
+FormData.prototype._getContentDisposition = function(value, options) {
+
+  var filename
+    , contentDisposition
+    ;
+
+  if (typeof options.filepath === 'string') {
+    // custom filepath for relative paths
+    filename = path.normalize(options.filepath).replace(/\\/g, '/');
+  } else if (options.filename || value.name || value.path) {
+    // custom filename take precedence
+    // formidable and the browser add a name property
+    // fs- and request- streams have path property
+    filename = path.basename(options.filename || value.name || value.path);
+  } else if (value.readable && value.hasOwnProperty('httpVersion')) {
+    // or try http response
+    filename = path.basename(value.client._httpMessage.path || '');
+  }
+
+  if (filename) {
+    contentDisposition = 'filename="' + filename + '"';
+  }
+
+  return contentDisposition;
+};
+
+FormData.prototype._getContentType = function(value, options) {
+
+  // use custom content-type above all
+  var contentType = options.contentType;
+
+  // or try `name` from formidable, browser
+  if (!contentType && value.name) {
+    contentType = mime.lookup(value.name);
+  }
+
+  // or try `path` from fs-, request- streams
+  if (!contentType && value.path) {
+    contentType = mime.lookup(value.path);
+  }
+
+  // or if it's http-reponse
+  if (!contentType && value.readable && value.hasOwnProperty('httpVersion')) {
+    contentType = value.headers['content-type'];
+  }
+
+  // or guess it from the filepath or filename
+  if (!contentType && (options.filepath || options.filename)) {
+    contentType = mime.lookup(options.filepath || options.filename);
+  }
+
+  // fallback to the default content type if `value` is not simple value
+  if (!contentType && typeof value == 'object') {
+    contentType = FormData.DEFAULT_CONTENT_TYPE;
+  }
+
+  return contentType;
+};
+
+FormData.prototype._multiPartFooter = function() {
+  return function(next) {
+    var footer = FormData.LINE_BREAK;
+
+    var lastPart = (this._streams.length === 0);
+    if (lastPart) {
+      footer += this._lastBoundary();
+    }
+
+    next(footer);
+  }.bind(this);
+};
+
+FormData.prototype._lastBoundary = function() {
+  return '--' + this.getBoundary() + '--' + FormData.LINE_BREAK;
+};
+
+FormData.prototype.getHeaders = function(userHeaders) {
+  var header;
+  var formHeaders = {
+    'content-type': 'multipart/form-data; boundary=' + this.getBoundary()
+  };
+
+  for (header in userHeaders) {
+    if (userHeaders.hasOwnProperty(header)) {
+      formHeaders[header.toLowerCase()] = userHeaders[header];
+    }
+  }
+
+  return formHeaders;
+};
+
+FormData.prototype.setBoundary = function(boundary) {
+  this._boundary = boundary;
+};
+
+FormData.prototype.getBoundary = function() {
+  if (!this._boundary) {
+    this._generateBoundary();
+  }
+
+  return this._boundary;
+};
+
+FormData.prototype.getBuffer = function() {
+  var dataBuffer = new Buffer.alloc( 0 );
+  var boundary = this.getBoundary();
+
+  // Create the form content. Add Line breaks to the end of data.
+  for (var i = 0, len = this._streams.length; i < len; i++) {
+    if (typeof this._streams[i] !== 'function') {
+
+      // Add content to the buffer.
+      if(Buffer.isBuffer(this._streams[i])) {
+        dataBuffer = Buffer.concat( [dataBuffer, this._streams[i]]);
+      }else {
+        dataBuffer = Buffer.concat( [dataBuffer, Buffer.from(this._streams[i])]);
+      }
+
+      // Add break after content.
+      if (typeof this._streams[i] !== 'string' || this._streams[i].substring( 2, boundary.length + 2 ) !== boundary) {
+        dataBuffer = Buffer.concat( [dataBuffer, Buffer.from(FormData.LINE_BREAK)] );
+      }
+    }
+  }
+
+  // Add the footer and return the Buffer object.
+  return Buffer.concat( [dataBuffer, Buffer.from(this._lastBoundary())] );
+};
+
+FormData.prototype._generateBoundary = function() {
+  // This generates a 50 character boundary similar to those used by Firefox.
+  // They are optimized for boyer-moore parsing.
+  var boundary = '--------------------------';
+  for (var i = 0; i < 24; i++) {
+    boundary += Math.floor(Math.random() * 10).toString(16);
+  }
+
+  this._boundary = boundary;
+};
+
+// Note: getLengthSync DOESN'T calculate streams length
+// As workaround one can calculate file size manually
+// and add it as knownLength option
+FormData.prototype.getLengthSync = function() {
+  var knownLength = this._overheadLength + this._valueLength;
+
+  // Don't get confused, there are 3 "internal" streams for each keyval pair
+  // so it basically checks if there is any value added to the form
+  if (this._streams.length) {
+    knownLength += this._lastBoundary().length;
+  }
+
+  // https://github.com/form-data/form-data/issues/40
+  if (!this.hasKnownLength()) {
+    // Some async length retrievers are present
+    // therefore synchronous length calculation is false.
+    // Please use getLength(callback) to get proper length
+    this._error(new Error('Cannot calculate proper length in synchronous way.'));
+  }
+
+  return knownLength;
+};
+
+// Public API to check if length of added values is known
+// https://github.com/form-data/form-data/issues/196
+// https://github.com/form-data/form-data/issues/262
+FormData.prototype.hasKnownLength = function() {
+  var hasKnownLength = true;
+
+  if (this._valuesToMeasure.length) {
+    hasKnownLength = false;
+  }
+
+  return hasKnownLength;
+};
+
+FormData.prototype.getLength = function(cb) {
+  var knownLength = this._overheadLength + this._valueLength;
+
+  if (this._streams.length) {
+    knownLength += this._lastBoundary().length;
+  }
+
+  if (!this._valuesToMeasure.length) {
+    process.nextTick(cb.bind(this, null, knownLength));
+    return;
+  }
+
+  asynckit.parallel(this._valuesToMeasure, this._lengthRetriever, function(err, values) {
+    if (err) {
+      cb(err);
+      return;
+    }
+
+    values.forEach(function(length) {
+      knownLength += length;
+    });
+
+    cb(null, knownLength);
+  });
+};
+
+FormData.prototype.submit = function(params, cb) {
+  var request
+    , options
+    , defaults = {method: 'post'}
+    ;
+
+  // parse provided url if it's string
+  // or treat it as options object
+  if (typeof params == 'string') {
+
+    params = parseUrl(params);
+    options = populate({
+      port: params.port,
+      path: params.pathname,
+      host: params.hostname,
+      protocol: params.protocol
+    }, defaults);
+
+  // use custom params
+  } else {
+
+    options = populate(params, defaults);
+    // if no port provided use default one
+    if (!options.port) {
+      options.port = options.protocol == 'https:' ? 443 : 80;
+    }
+  }
+
+  // put that good code in getHeaders to some use
+  options.headers = this.getHeaders(params.headers);
+
+  // https if specified, fallback to http in any other case
+  if (options.protocol == 'https:') {
+    request = https.request(options);
+  } else {
+    request = http.request(options);
+  }
+
+  // get content length and fire away
+  this.getLength(function(err, length) {
+    if (err) {
+      this._error(err);
+      return;
+    }
+
+    // add content length
+    request.setHeader('Content-Length', length);
+
+    this.pipe(request);
+    if (cb) {
+      var onResponse;
+
+      var callback = function (error, responce) {
+        request.removeListener('error', callback);
+        request.removeListener('response', onResponse);
+
+        return cb.call(this, error, responce);
+      };
+
+      onResponse = callback.bind(this, null);
+
+      request.on('error', callback);
+      request.on('response', onResponse);
+    }
+  }.bind(this));
+
+  return request;
+};
+
+FormData.prototype._error = function(err) {
+  if (!this.error) {
+    this.error = err;
+    this.pause();
+    this.emit('error', err);
+  }
+};
+
+FormData.prototype.toString = function () {
+  return '[object FormData]';
 };
 
 
 /***/ }),
 
-/***/ 6214:
+/***/ 7142:
+/***/ ((module) => {
+
+// populates missing values
+module.exports = function(dst, src) {
+
+  Object.keys(src).forEach(function(prop)
+  {
+    dst[prop] = dst[prop] || src[prop];
+  });
+
+  return dst;
+};
+
+
+/***/ }),
+
+/***/ 3359:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+var jws = __nccwpck_require__(4636);
+
+module.exports = function (jwt, options) {
+  options = options || {};
+  var decoded = jws.decode(jwt, options);
+  if (!decoded) { return null; }
+  var payload = decoded.payload;
+
+  //try parse the payload
+  if(typeof payload === 'string') {
+    try {
+      var obj = JSON.parse(payload);
+      if(obj !== null && typeof obj === 'object') {
+        payload = obj;
+      }
+    } catch (e) { }
+  }
+
+  //return header if `complete` option is enabled.  header includes claims
+  //such as `kid` and `alg` used to select the key within a JWKS needed to
+  //verify the signature
+  if (options.complete === true) {
+    return {
+      header: decoded.header,
+      payload: payload,
+      signature: decoded.signature
+    };
+  }
+  return payload;
+};
+
+
+/***/ }),
+
+/***/ 7486:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+module.exports = {
+  decode: __nccwpck_require__(3359),
+  verify: __nccwpck_require__(2327),
+  sign: __nccwpck_require__(2022),
+  JsonWebTokenError: __nccwpck_require__(405),
+  NotBeforeError: __nccwpck_require__(4383),
+  TokenExpiredError: __nccwpck_require__(6637),
+};
+
+
+/***/ }),
+
+/***/ 405:
+/***/ ((module) => {
+
+var JsonWebTokenError = function (message, error) {
+  Error.call(this, message);
+  if(Error.captureStackTrace) {
+    Error.captureStackTrace(this, this.constructor);
+  }
+  this.name = 'JsonWebTokenError';
+  this.message = message;
+  if (error) this.inner = error;
+};
+
+JsonWebTokenError.prototype = Object.create(Error.prototype);
+JsonWebTokenError.prototype.constructor = JsonWebTokenError;
+
+module.exports = JsonWebTokenError;
+
+
+/***/ }),
+
+/***/ 4383:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+var JsonWebTokenError = __nccwpck_require__(405);
+
+var NotBeforeError = function (message, date) {
+  JsonWebTokenError.call(this, message);
+  this.name = 'NotBeforeError';
+  this.date = date;
+};
+
+NotBeforeError.prototype = Object.create(JsonWebTokenError.prototype);
+
+NotBeforeError.prototype.constructor = NotBeforeError;
+
+module.exports = NotBeforeError;
+
+/***/ }),
+
+/***/ 6637:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+var JsonWebTokenError = __nccwpck_require__(405);
+
+var TokenExpiredError = function (message, expiredAt) {
+  JsonWebTokenError.call(this, message);
+  this.name = 'TokenExpiredError';
+  this.expiredAt = expiredAt;
+};
+
+TokenExpiredError.prototype = Object.create(JsonWebTokenError.prototype);
+
+TokenExpiredError.prototype.constructor = TokenExpiredError;
+
+module.exports = TokenExpiredError;
+
+/***/ }),
+
+/***/ 9085:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+var semver = __nccwpck_require__(7174);
+
+module.exports = semver.satisfies(process.version, '^6.12.0 || >=8.0.0');
+
+
+/***/ }),
+
+/***/ 6098:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+var ms = __nccwpck_require__(900);
+
+module.exports = function (time, iat) {
+  var timestamp = iat || Math.floor(Date.now() / 1000);
+
+  if (typeof time === 'string') {
+    var milliseconds = ms(time);
+    if (typeof milliseconds === 'undefined') {
+      return;
+    }
+    return Math.floor(timestamp + milliseconds / 1000);
+  } else if (typeof time === 'number') {
+    return timestamp + time;
+  } else {
+    return;
+  }
+
+};
+
+/***/ }),
+
+/***/ 7174:
 /***/ ((module, exports) => {
 
+exports = module.exports = SemVer
 
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-function isTLSSocket(socket) {
-    return socket.encrypted;
-}
-const deferToConnect = (socket, fn) => {
-    let listeners;
-    if (typeof fn === 'function') {
-        const connect = fn;
-        listeners = { connect };
-    }
-    else {
-        listeners = fn;
-    }
-    const hasConnectListener = typeof listeners.connect === 'function';
-    const hasSecureConnectListener = typeof listeners.secureConnect === 'function';
-    const hasCloseListener = typeof listeners.close === 'function';
-    const onConnect = () => {
-        if (hasConnectListener) {
-            listeners.connect();
-        }
-        if (isTLSSocket(socket) && hasSecureConnectListener) {
-            if (socket.authorized) {
-                listeners.secureConnect();
-            }
-            else if (!socket.authorizationError) {
-                socket.once('secureConnect', listeners.secureConnect);
-            }
-        }
-        if (hasCloseListener) {
-            socket.once('close', listeners.close);
-        }
-    };
-    if (socket.writable && !socket.connecting) {
-        onConnect();
-    }
-    else if (socket.connecting) {
-        socket.once('connect', onConnect);
-    }
-    else if (socket.destroyed && hasCloseListener) {
-        listeners.close(socket._hadError);
-    }
-};
-exports["default"] = deferToConnect;
-// For CommonJS default export support
-module.exports = deferToConnect;
-module.exports["default"] = deferToConnect;
-
-
-/***/ }),
-
-/***/ 1585:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-
-const {PassThrough: PassThroughStream} = __nccwpck_require__(2781);
-
-module.exports = options => {
-	options = {...options};
-
-	const {array} = options;
-	let {encoding} = options;
-	const isBuffer = encoding === 'buffer';
-	let objectMode = false;
-
-	if (array) {
-		objectMode = !(encoding || isBuffer);
-	} else {
-		encoding = encoding || 'utf8';
-	}
-
-	if (isBuffer) {
-		encoding = null;
-	}
-
-	const stream = new PassThroughStream({objectMode});
-
-	if (encoding) {
-		stream.setEncoding(encoding);
-	}
-
-	let length = 0;
-	const chunks = [];
-
-	stream.on('data', chunk => {
-		chunks.push(chunk);
-
-		if (objectMode) {
-			length = chunks.length;
-		} else {
-			length += chunk.length;
-		}
-	});
-
-	stream.getBufferedValue = () => {
-		if (array) {
-			return chunks;
-		}
-
-		return isBuffer ? Buffer.concat(chunks, length) : chunks.join('');
-	};
-
-	stream.getBufferedLength = () => length;
-
-	return stream;
-};
-
-
-/***/ }),
-
-/***/ 1766:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-
-const {constants: BufferConstants} = __nccwpck_require__(4300);
-const stream = __nccwpck_require__(2781);
-const {promisify} = __nccwpck_require__(3837);
-const bufferStream = __nccwpck_require__(1585);
-
-const streamPipelinePromisified = promisify(stream.pipeline);
-
-class MaxBufferError extends Error {
-	constructor() {
-		super('maxBuffer exceeded');
-		this.name = 'MaxBufferError';
-	}
+var debug
+/* istanbul ignore next */
+if (typeof process === 'object' &&
+    process.env &&
+    process.env.NODE_DEBUG &&
+    /\bsemver\b/i.test(process.env.NODE_DEBUG)) {
+  debug = function () {
+    var args = Array.prototype.slice.call(arguments, 0)
+    args.unshift('SEMVER')
+    console.log.apply(console, args)
+  }
+} else {
+  debug = function () {}
 }
 
-async function getStream(inputStream, options) {
-	if (!inputStream) {
-		throw new Error('Expected a stream');
-	}
+// Note: this is the semver.org version of the spec that it implements
+// Not necessarily the package version of this code.
+exports.SEMVER_SPEC_VERSION = '2.0.0'
 
-	options = {
-		maxBuffer: Infinity,
-		...options
-	};
+var MAX_LENGTH = 256
+var MAX_SAFE_INTEGER = Number.MAX_SAFE_INTEGER ||
+  /* istanbul ignore next */ 9007199254740991
 
-	const {maxBuffer} = options;
-	const stream = bufferStream(options);
+// Max safe segment length for coercion.
+var MAX_SAFE_COMPONENT_LENGTH = 16
 
-	await new Promise((resolve, reject) => {
-		const rejectPromise = error => {
-			// Don't retrieve an oversized buffer.
-			if (error && stream.getBufferedLength() <= BufferConstants.MAX_LENGTH) {
-				error.bufferedData = stream.getBufferedValue();
-			}
+// The actual regexps go on exports.re
+var re = exports.re = []
+var src = exports.src = []
+var R = 0
 
-			reject(error);
-		};
+// The following Regular Expressions can be used for tokenizing,
+// validating, and parsing SemVer version strings.
 
-		(async () => {
-			try {
-				await streamPipelinePromisified(inputStream, stream);
-				resolve();
-			} catch (error) {
-				rejectPromise(error);
-			}
-		})();
+// ## Numeric Identifier
+// A single `0`, or a non-zero digit followed by zero or more digits.
 
-		stream.on('data', () => {
-			if (stream.getBufferedLength() > maxBuffer) {
-				rejectPromise(new MaxBufferError());
-			}
-		});
-	});
+var NUMERICIDENTIFIER = R++
+src[NUMERICIDENTIFIER] = '0|[1-9]\\d*'
+var NUMERICIDENTIFIERLOOSE = R++
+src[NUMERICIDENTIFIERLOOSE] = '[0-9]+'
 
-	return stream.getBufferedValue();
+// ## Non-numeric Identifier
+// Zero or more digits, followed by a letter or hyphen, and then zero or
+// more letters, digits, or hyphens.
+
+var NONNUMERICIDENTIFIER = R++
+src[NONNUMERICIDENTIFIER] = '\\d*[a-zA-Z-][a-zA-Z0-9-]*'
+
+// ## Main Version
+// Three dot-separated numeric identifiers.
+
+var MAINVERSION = R++
+src[MAINVERSION] = '(' + src[NUMERICIDENTIFIER] + ')\\.' +
+                   '(' + src[NUMERICIDENTIFIER] + ')\\.' +
+                   '(' + src[NUMERICIDENTIFIER] + ')'
+
+var MAINVERSIONLOOSE = R++
+src[MAINVERSIONLOOSE] = '(' + src[NUMERICIDENTIFIERLOOSE] + ')\\.' +
+                        '(' + src[NUMERICIDENTIFIERLOOSE] + ')\\.' +
+                        '(' + src[NUMERICIDENTIFIERLOOSE] + ')'
+
+// ## Pre-release Version Identifier
+// A numeric identifier, or a non-numeric identifier.
+
+var PRERELEASEIDENTIFIER = R++
+src[PRERELEASEIDENTIFIER] = '(?:' + src[NUMERICIDENTIFIER] +
+                            '|' + src[NONNUMERICIDENTIFIER] + ')'
+
+var PRERELEASEIDENTIFIERLOOSE = R++
+src[PRERELEASEIDENTIFIERLOOSE] = '(?:' + src[NUMERICIDENTIFIERLOOSE] +
+                                 '|' + src[NONNUMERICIDENTIFIER] + ')'
+
+// ## Pre-release Version
+// Hyphen, followed by one or more dot-separated pre-release version
+// identifiers.
+
+var PRERELEASE = R++
+src[PRERELEASE] = '(?:-(' + src[PRERELEASEIDENTIFIER] +
+                  '(?:\\.' + src[PRERELEASEIDENTIFIER] + ')*))'
+
+var PRERELEASELOOSE = R++
+src[PRERELEASELOOSE] = '(?:-?(' + src[PRERELEASEIDENTIFIERLOOSE] +
+                       '(?:\\.' + src[PRERELEASEIDENTIFIERLOOSE] + ')*))'
+
+// ## Build Metadata Identifier
+// Any combination of digits, letters, or hyphens.
+
+var BUILDIDENTIFIER = R++
+src[BUILDIDENTIFIER] = '[0-9A-Za-z-]+'
+
+// ## Build Metadata
+// Plus sign, followed by one or more period-separated build metadata
+// identifiers.
+
+var BUILD = R++
+src[BUILD] = '(?:\\+(' + src[BUILDIDENTIFIER] +
+             '(?:\\.' + src[BUILDIDENTIFIER] + ')*))'
+
+// ## Full Version String
+// A main version, followed optionally by a pre-release version and
+// build metadata.
+
+// Note that the only major, minor, patch, and pre-release sections of
+// the version string are capturing groups.  The build metadata is not a
+// capturing group, because it should not ever be used in version
+// comparison.
+
+var FULL = R++
+var FULLPLAIN = 'v?' + src[MAINVERSION] +
+                src[PRERELEASE] + '?' +
+                src[BUILD] + '?'
+
+src[FULL] = '^' + FULLPLAIN + '$'
+
+// like full, but allows v1.2.3 and =1.2.3, which people do sometimes.
+// also, 1.0.0alpha1 (prerelease without the hyphen) which is pretty
+// common in the npm registry.
+var LOOSEPLAIN = '[v=\\s]*' + src[MAINVERSIONLOOSE] +
+                 src[PRERELEASELOOSE] + '?' +
+                 src[BUILD] + '?'
+
+var LOOSE = R++
+src[LOOSE] = '^' + LOOSEPLAIN + '$'
+
+var GTLT = R++
+src[GTLT] = '((?:<|>)?=?)'
+
+// Something like "2.*" or "1.2.x".
+// Note that "x.x" is a valid xRange identifer, meaning "any version"
+// Only the first item is strictly required.
+var XRANGEIDENTIFIERLOOSE = R++
+src[XRANGEIDENTIFIERLOOSE] = src[NUMERICIDENTIFIERLOOSE] + '|x|X|\\*'
+var XRANGEIDENTIFIER = R++
+src[XRANGEIDENTIFIER] = src[NUMERICIDENTIFIER] + '|x|X|\\*'
+
+var XRANGEPLAIN = R++
+src[XRANGEPLAIN] = '[v=\\s]*(' + src[XRANGEIDENTIFIER] + ')' +
+                   '(?:\\.(' + src[XRANGEIDENTIFIER] + ')' +
+                   '(?:\\.(' + src[XRANGEIDENTIFIER] + ')' +
+                   '(?:' + src[PRERELEASE] + ')?' +
+                   src[BUILD] + '?' +
+                   ')?)?'
+
+var XRANGEPLAINLOOSE = R++
+src[XRANGEPLAINLOOSE] = '[v=\\s]*(' + src[XRANGEIDENTIFIERLOOSE] + ')' +
+                        '(?:\\.(' + src[XRANGEIDENTIFIERLOOSE] + ')' +
+                        '(?:\\.(' + src[XRANGEIDENTIFIERLOOSE] + ')' +
+                        '(?:' + src[PRERELEASELOOSE] + ')?' +
+                        src[BUILD] + '?' +
+                        ')?)?'
+
+var XRANGE = R++
+src[XRANGE] = '^' + src[GTLT] + '\\s*' + src[XRANGEPLAIN] + '$'
+var XRANGELOOSE = R++
+src[XRANGELOOSE] = '^' + src[GTLT] + '\\s*' + src[XRANGEPLAINLOOSE] + '$'
+
+// Coercion.
+// Extract anything that could conceivably be a part of a valid semver
+var COERCE = R++
+src[COERCE] = '(?:^|[^\\d])' +
+              '(\\d{1,' + MAX_SAFE_COMPONENT_LENGTH + '})' +
+              '(?:\\.(\\d{1,' + MAX_SAFE_COMPONENT_LENGTH + '}))?' +
+              '(?:\\.(\\d{1,' + MAX_SAFE_COMPONENT_LENGTH + '}))?' +
+              '(?:$|[^\\d])'
+
+// Tilde ranges.
+// Meaning is "reasonably at or greater than"
+var LONETILDE = R++
+src[LONETILDE] = '(?:~>?)'
+
+var TILDETRIM = R++
+src[TILDETRIM] = '(\\s*)' + src[LONETILDE] + '\\s+'
+re[TILDETRIM] = new RegExp(src[TILDETRIM], 'g')
+var tildeTrimReplace = '$1~'
+
+var TILDE = R++
+src[TILDE] = '^' + src[LONETILDE] + src[XRANGEPLAIN] + '$'
+var TILDELOOSE = R++
+src[TILDELOOSE] = '^' + src[LONETILDE] + src[XRANGEPLAINLOOSE] + '$'
+
+// Caret ranges.
+// Meaning is "at least and backwards compatible with"
+var LONECARET = R++
+src[LONECARET] = '(?:\\^)'
+
+var CARETTRIM = R++
+src[CARETTRIM] = '(\\s*)' + src[LONECARET] + '\\s+'
+re[CARETTRIM] = new RegExp(src[CARETTRIM], 'g')
+var caretTrimReplace = '$1^'
+
+var CARET = R++
+src[CARET] = '^' + src[LONECARET] + src[XRANGEPLAIN] + '$'
+var CARETLOOSE = R++
+src[CARETLOOSE] = '^' + src[LONECARET] + src[XRANGEPLAINLOOSE] + '$'
+
+// A simple gt/lt/eq thing, or just "" to indicate "any version"
+var COMPARATORLOOSE = R++
+src[COMPARATORLOOSE] = '^' + src[GTLT] + '\\s*(' + LOOSEPLAIN + ')$|^$'
+var COMPARATOR = R++
+src[COMPARATOR] = '^' + src[GTLT] + '\\s*(' + FULLPLAIN + ')$|^$'
+
+// An expression to strip any whitespace between the gtlt and the thing
+// it modifies, so that `> 1.2.3` ==> `>1.2.3`
+var COMPARATORTRIM = R++
+src[COMPARATORTRIM] = '(\\s*)' + src[GTLT] +
+                      '\\s*(' + LOOSEPLAIN + '|' + src[XRANGEPLAIN] + ')'
+
+// this one has to use the /g flag
+re[COMPARATORTRIM] = new RegExp(src[COMPARATORTRIM], 'g')
+var comparatorTrimReplace = '$1$2$3'
+
+// Something like `1.2.3 - 1.2.4`
+// Note that these all use the loose form, because they'll be
+// checked against either the strict or loose comparator form
+// later.
+var HYPHENRANGE = R++
+src[HYPHENRANGE] = '^\\s*(' + src[XRANGEPLAIN] + ')' +
+                   '\\s+-\\s+' +
+                   '(' + src[XRANGEPLAIN] + ')' +
+                   '\\s*$'
+
+var HYPHENRANGELOOSE = R++
+src[HYPHENRANGELOOSE] = '^\\s*(' + src[XRANGEPLAINLOOSE] + ')' +
+                        '\\s+-\\s+' +
+                        '(' + src[XRANGEPLAINLOOSE] + ')' +
+                        '\\s*$'
+
+// Star ranges basically just allow anything at all.
+var STAR = R++
+src[STAR] = '(<|>)?=?\\s*\\*'
+
+// Compile to actual regexp objects.
+// All are flag-free, unless they were created above with a flag.
+for (var i = 0; i < R; i++) {
+  debug(i, src[i])
+  if (!re[i]) {
+    re[i] = new RegExp(src[i])
+  }
 }
 
-module.exports = getStream;
-module.exports.buffer = (stream, options) => getStream(stream, {...options, encoding: 'buffer'});
-module.exports.array = (stream, options) => getStream(stream, {...options, array: true});
-module.exports.MaxBufferError = MaxBufferError;
+exports.parse = parse
+function parse (version, options) {
+  if (!options || typeof options !== 'object') {
+    options = {
+      loose: !!options,
+      includePrerelease: false
+    }
+  }
 
+  if (version instanceof SemVer) {
+    return version
+  }
 
-/***/ }),
+  if (typeof version !== 'string') {
+    return null
+  }
 
-/***/ 1002:
-/***/ ((module) => {
+  if (version.length > MAX_LENGTH) {
+    return null
+  }
 
+  var r = options.loose ? re[LOOSE] : re[FULL]
+  if (!r.test(version)) {
+    return null
+  }
 
-// rfc7231 6.1
-const statusCodeCacheableByDefault = new Set([
-    200,
-    203,
-    204,
-    206,
-    300,
-    301,
-    404,
-    405,
-    410,
-    414,
-    501,
-]);
-
-// This implementation does not understand partial responses (206)
-const understoodStatuses = new Set([
-    200,
-    203,
-    204,
-    300,
-    301,
-    302,
-    303,
-    307,
-    308,
-    404,
-    405,
-    410,
-    414,
-    501,
-]);
-
-const errorStatusCodes = new Set([
-    500,
-    502,
-    503, 
-    504,
-]);
-
-const hopByHopHeaders = {
-    date: true, // included, because we add Age update Date
-    connection: true,
-    'keep-alive': true,
-    'proxy-authenticate': true,
-    'proxy-authorization': true,
-    te: true,
-    trailer: true,
-    'transfer-encoding': true,
-    upgrade: true,
-};
-
-const excludedFromRevalidationUpdate = {
-    // Since the old body is reused, it doesn't make sense to change properties of the body
-    'content-length': true,
-    'content-encoding': true,
-    'transfer-encoding': true,
-    'content-range': true,
-};
-
-function toNumberOrZero(s) {
-    const n = parseInt(s, 10);
-    return isFinite(n) ? n : 0;
+  try {
+    return new SemVer(version, options)
+  } catch (er) {
+    return null
+  }
 }
 
-// RFC 5861
-function isErrorResponse(response) {
-    // consider undefined response as faulty
-    if(!response) {
-        return true
-    }
-    return errorStatusCodes.has(response.status);
+exports.valid = valid
+function valid (version, options) {
+  var v = parse(version, options)
+  return v ? v.version : null
 }
 
-function parseCacheControl(header) {
-    const cc = {};
-    if (!header) return cc;
-
-    // TODO: When there is more than one value present for a given directive (e.g., two Expires header fields, multiple Cache-Control: max-age directives),
-    // the directive's value is considered invalid. Caches are encouraged to consider responses that have invalid freshness information to be stale
-    const parts = header.trim().split(/\s*,\s*/); // TODO: lame parsing
-    for (const part of parts) {
-        const [k, v] = part.split(/\s*=\s*/, 2);
-        cc[k] = v === undefined ? true : v.replace(/^"|"$/g, ''); // TODO: lame unquoting
-    }
-
-    return cc;
+exports.clean = clean
+function clean (version, options) {
+  var s = parse(version.trim().replace(/^[=v]+/, ''), options)
+  return s ? s.version : null
 }
 
-function formatCacheControl(cc) {
-    let parts = [];
-    for (const k in cc) {
-        const v = cc[k];
-        parts.push(v === true ? k : k + '=' + v);
+exports.SemVer = SemVer
+
+function SemVer (version, options) {
+  if (!options || typeof options !== 'object') {
+    options = {
+      loose: !!options,
+      includePrerelease: false
     }
-    if (!parts.length) {
-        return undefined;
+  }
+  if (version instanceof SemVer) {
+    if (version.loose === options.loose) {
+      return version
+    } else {
+      version = version.version
     }
-    return parts.join(', ');
+  } else if (typeof version !== 'string') {
+    throw new TypeError('Invalid Version: ' + version)
+  }
+
+  if (version.length > MAX_LENGTH) {
+    throw new TypeError('version is longer than ' + MAX_LENGTH + ' characters')
+  }
+
+  if (!(this instanceof SemVer)) {
+    return new SemVer(version, options)
+  }
+
+  debug('SemVer', version, options)
+  this.options = options
+  this.loose = !!options.loose
+
+  var m = version.trim().match(options.loose ? re[LOOSE] : re[FULL])
+
+  if (!m) {
+    throw new TypeError('Invalid Version: ' + version)
+  }
+
+  this.raw = version
+
+  // these are actually numbers
+  this.major = +m[1]
+  this.minor = +m[2]
+  this.patch = +m[3]
+
+  if (this.major > MAX_SAFE_INTEGER || this.major < 0) {
+    throw new TypeError('Invalid major version')
+  }
+
+  if (this.minor > MAX_SAFE_INTEGER || this.minor < 0) {
+    throw new TypeError('Invalid minor version')
+  }
+
+  if (this.patch > MAX_SAFE_INTEGER || this.patch < 0) {
+    throw new TypeError('Invalid patch version')
+  }
+
+  // numberify any prerelease numeric ids
+  if (!m[4]) {
+    this.prerelease = []
+  } else {
+    this.prerelease = m[4].split('.').map(function (id) {
+      if (/^[0-9]+$/.test(id)) {
+        var num = +id
+        if (num >= 0 && num < MAX_SAFE_INTEGER) {
+          return num
+        }
+      }
+      return id
+    })
+  }
+
+  this.build = m[5] ? m[5].split('.') : []
+  this.format()
 }
 
-module.exports = class CachePolicy {
-    constructor(
-        req,
-        res,
-        {
-            shared,
-            cacheHeuristic,
-            immutableMinTimeToLive,
-            ignoreCargoCult,
-            _fromObject,
-        } = {}
-    ) {
-        if (_fromObject) {
-            this._fromObject(_fromObject);
-            return;
-        }
+SemVer.prototype.format = function () {
+  this.version = this.major + '.' + this.minor + '.' + this.patch
+  if (this.prerelease.length) {
+    this.version += '-' + this.prerelease.join('.')
+  }
+  return this.version
+}
 
-        if (!res || !res.headers) {
-            throw Error('Response headers missing');
-        }
-        this._assertRequestHasHeaders(req);
+SemVer.prototype.toString = function () {
+  return this.version
+}
 
-        this._responseTime = this.now();
-        this._isShared = shared !== false;
-        this._cacheHeuristic =
-            undefined !== cacheHeuristic ? cacheHeuristic : 0.1; // 10% matches IE
-        this._immutableMinTtl =
-            undefined !== immutableMinTimeToLive
-                ? immutableMinTimeToLive
-                : 24 * 3600 * 1000;
+SemVer.prototype.compare = function (other) {
+  debug('SemVer.compare', this.version, this.options, other)
+  if (!(other instanceof SemVer)) {
+    other = new SemVer(other, this.options)
+  }
 
-        this._status = 'status' in res ? res.status : 200;
-        this._resHeaders = res.headers;
-        this._rescc = parseCacheControl(res.headers['cache-control']);
-        this._method = 'method' in req ? req.method : 'GET';
-        this._url = req.url;
-        this._host = req.headers.host;
-        this._noAuthorization = !req.headers.authorization;
-        this._reqHeaders = res.headers.vary ? req.headers : null; // Don't keep all request headers if they won't be used
-        this._reqcc = parseCacheControl(req.headers['cache-control']);
+  return this.compareMain(other) || this.comparePre(other)
+}
 
-        // Assume that if someone uses legacy, non-standard uncecessary options they don't understand caching,
-        // so there's no point stricly adhering to the blindly copy&pasted directives.
-        if (
-            ignoreCargoCult &&
-            'pre-check' in this._rescc &&
-            'post-check' in this._rescc
-        ) {
-            delete this._rescc['pre-check'];
-            delete this._rescc['post-check'];
-            delete this._rescc['no-cache'];
-            delete this._rescc['no-store'];
-            delete this._rescc['must-revalidate'];
-            this._resHeaders = Object.assign({}, this._resHeaders, {
-                'cache-control': formatCacheControl(this._rescc),
-            });
-            delete this._resHeaders.expires;
-            delete this._resHeaders.pragma;
-        }
+SemVer.prototype.compareMain = function (other) {
+  if (!(other instanceof SemVer)) {
+    other = new SemVer(other, this.options)
+  }
 
-        // When the Cache-Control header field is not present in a request, caches MUST consider the no-cache request pragma-directive
-        // as having the same effect as if "Cache-Control: no-cache" were present (see Section 5.2.1).
-        if (
-            res.headers['cache-control'] == null &&
-            /no-cache/.test(res.headers.pragma)
-        ) {
-            this._rescc['no-cache'] = true;
-        }
+  return compareIdentifiers(this.major, other.major) ||
+         compareIdentifiers(this.minor, other.minor) ||
+         compareIdentifiers(this.patch, other.patch)
+}
+
+SemVer.prototype.comparePre = function (other) {
+  if (!(other instanceof SemVer)) {
+    other = new SemVer(other, this.options)
+  }
+
+  // NOT having a prerelease is > having one
+  if (this.prerelease.length && !other.prerelease.length) {
+    return -1
+  } else if (!this.prerelease.length && other.prerelease.length) {
+    return 1
+  } else if (!this.prerelease.length && !other.prerelease.length) {
+    return 0
+  }
+
+  var i = 0
+  do {
+    var a = this.prerelease[i]
+    var b = other.prerelease[i]
+    debug('prerelease compare', i, a, b)
+    if (a === undefined && b === undefined) {
+      return 0
+    } else if (b === undefined) {
+      return 1
+    } else if (a === undefined) {
+      return -1
+    } else if (a === b) {
+      continue
+    } else {
+      return compareIdentifiers(a, b)
     }
+  } while (++i)
+}
 
-    now() {
-        return Date.now();
-    }
+// preminor will bump the version up to the next minor release, and immediately
+// down to pre-release. premajor and prepatch work the same way.
+SemVer.prototype.inc = function (release, identifier) {
+  switch (release) {
+    case 'premajor':
+      this.prerelease.length = 0
+      this.patch = 0
+      this.minor = 0
+      this.major++
+      this.inc('pre', identifier)
+      break
+    case 'preminor':
+      this.prerelease.length = 0
+      this.patch = 0
+      this.minor++
+      this.inc('pre', identifier)
+      break
+    case 'prepatch':
+      // If this is already a prerelease, it will bump to the next version
+      // drop any prereleases that might already exist, since they are not
+      // relevant at this point.
+      this.prerelease.length = 0
+      this.inc('patch', identifier)
+      this.inc('pre', identifier)
+      break
+    // If the input is a non-prerelease version, this acts the same as
+    // prepatch.
+    case 'prerelease':
+      if (this.prerelease.length === 0) {
+        this.inc('patch', identifier)
+      }
+      this.inc('pre', identifier)
+      break
 
-    storable() {
-        // The "no-store" request directive indicates that a cache MUST NOT store any part of either this request or any response to it.
-        return !!(
-            !this._reqcc['no-store'] &&
-            // A cache MUST NOT store a response to any request, unless:
-            // The request method is understood by the cache and defined as being cacheable, and
-            ('GET' === this._method ||
-                'HEAD' === this._method ||
-                ('POST' === this._method && this._hasExplicitExpiration())) &&
-            // the response status code is understood by the cache, and
-            understoodStatuses.has(this._status) &&
-            // the "no-store" cache directive does not appear in request or response header fields, and
-            !this._rescc['no-store'] &&
-            // the "private" response directive does not appear in the response, if the cache is shared, and
-            (!this._isShared || !this._rescc.private) &&
-            // the Authorization header field does not appear in the request, if the cache is shared,
-            (!this._isShared ||
-                this._noAuthorization ||
-                this._allowsStoringAuthenticated()) &&
-            // the response either:
-            // contains an Expires header field, or
-            (this._resHeaders.expires ||
-                // contains a max-age response directive, or
-                // contains a s-maxage response directive and the cache is shared, or
-                // contains a public response directive.
-                this._rescc['max-age'] ||
-                (this._isShared && this._rescc['s-maxage']) ||
-                this._rescc.public ||
-                // has a status code that is defined as cacheable by default
-                statusCodeCacheableByDefault.has(this._status))
-        );
-    }
-
-    _hasExplicitExpiration() {
-        // 4.2.1 Calculating Freshness Lifetime
-        return (
-            (this._isShared && this._rescc['s-maxage']) ||
-            this._rescc['max-age'] ||
-            this._resHeaders.expires
-        );
-    }
-
-    _assertRequestHasHeaders(req) {
-        if (!req || !req.headers) {
-            throw Error('Request headers missing');
+    case 'major':
+      // If this is a pre-major version, bump up to the same major version.
+      // Otherwise increment major.
+      // 1.0.0-5 bumps to 1.0.0
+      // 1.1.0 bumps to 2.0.0
+      if (this.minor !== 0 ||
+          this.patch !== 0 ||
+          this.prerelease.length === 0) {
+        this.major++
+      }
+      this.minor = 0
+      this.patch = 0
+      this.prerelease = []
+      break
+    case 'minor':
+      // If this is a pre-minor version, bump up to the same minor version.
+      // Otherwise increment minor.
+      // 1.2.0-5 bumps to 1.2.0
+      // 1.2.1 bumps to 1.3.0
+      if (this.patch !== 0 || this.prerelease.length === 0) {
+        this.minor++
+      }
+      this.patch = 0
+      this.prerelease = []
+      break
+    case 'patch':
+      // If this is not a pre-release version, it will increment the patch.
+      // If it is a pre-release it will bump up to the same patch version.
+      // 1.2.0-5 patches to 1.2.0
+      // 1.2.0 patches to 1.2.1
+      if (this.prerelease.length === 0) {
+        this.patch++
+      }
+      this.prerelease = []
+      break
+    // This probably shouldn't be used publicly.
+    // 1.0.0 "pre" would become 1.0.0-0 which is the wrong direction.
+    case 'pre':
+      if (this.prerelease.length === 0) {
+        this.prerelease = [0]
+      } else {
+        var i = this.prerelease.length
+        while (--i >= 0) {
+          if (typeof this.prerelease[i] === 'number') {
+            this.prerelease[i]++
+            i = -2
+          }
         }
-    }
-
-    satisfiesWithoutRevalidation(req) {
-        this._assertRequestHasHeaders(req);
-
-        // When presented with a request, a cache MUST NOT reuse a stored response, unless:
-        // the presented request does not contain the no-cache pragma (Section 5.4), nor the no-cache cache directive,
-        // unless the stored response is successfully validated (Section 4.3), and
-        const requestCC = parseCacheControl(req.headers['cache-control']);
-        if (requestCC['no-cache'] || /no-cache/.test(req.headers.pragma)) {
-            return false;
+        if (i === -1) {
+          // didn't increment anything
+          this.prerelease.push(0)
         }
-
-        if (requestCC['max-age'] && this.age() > requestCC['max-age']) {
-            return false;
-        }
-
-        if (
-            requestCC['min-fresh'] &&
-            this.timeToLive() < 1000 * requestCC['min-fresh']
-        ) {
-            return false;
-        }
-
-        // the stored response is either:
-        // fresh, or allowed to be served stale
-        if (this.stale()) {
-            const allowsStale =
-                requestCC['max-stale'] &&
-                !this._rescc['must-revalidate'] &&
-                (true === requestCC['max-stale'] ||
-                    requestCC['max-stale'] > this.age() - this.maxAge());
-            if (!allowsStale) {
-                return false;
-            }
-        }
-
-        return this._requestMatches(req, false);
-    }
-
-    _requestMatches(req, allowHeadMethod) {
-        // The presented effective request URI and that of the stored response match, and
-        return (
-            (!this._url || this._url === req.url) &&
-            this._host === req.headers.host &&
-            // the request method associated with the stored response allows it to be used for the presented request, and
-            (!req.method ||
-                this._method === req.method ||
-                (allowHeadMethod && 'HEAD' === req.method)) &&
-            // selecting header fields nominated by the stored response (if any) match those presented, and
-            this._varyMatches(req)
-        );
-    }
-
-    _allowsStoringAuthenticated() {
-        //  following Cache-Control response directives (Section 5.2.2) have such an effect: must-revalidate, public, and s-maxage.
-        return (
-            this._rescc['must-revalidate'] ||
-            this._rescc.public ||
-            this._rescc['s-maxage']
-        );
-    }
-
-    _varyMatches(req) {
-        if (!this._resHeaders.vary) {
-            return true;
-        }
-
-        // A Vary header field-value of "*" always fails to match
-        if (this._resHeaders.vary === '*') {
-            return false;
-        }
-
-        const fields = this._resHeaders.vary
-            .trim()
-            .toLowerCase()
-            .split(/\s*,\s*/);
-        for (const name of fields) {
-            if (req.headers[name] !== this._reqHeaders[name]) return false;
-        }
-        return true;
-    }
-
-    _copyWithoutHopByHopHeaders(inHeaders) {
-        const headers = {};
-        for (const name in inHeaders) {
-            if (hopByHopHeaders[name]) continue;
-            headers[name] = inHeaders[name];
-        }
-        // 9.1.  Connection
-        if (inHeaders.connection) {
-            const tokens = inHeaders.connection.trim().split(/\s*,\s*/);
-            for (const name of tokens) {
-                delete headers[name];
-            }
-        }
-        if (headers.warning) {
-            const warnings = headers.warning.split(/,/).filter(warning => {
-                return !/^\s*1[0-9][0-9]/.test(warning);
-            });
-            if (!warnings.length) {
-                delete headers.warning;
-            } else {
-                headers.warning = warnings.join(',').trim();
-            }
-        }
-        return headers;
-    }
-
-    responseHeaders() {
-        const headers = this._copyWithoutHopByHopHeaders(this._resHeaders);
-        const age = this.age();
-
-        // A cache SHOULD generate 113 warning if it heuristically chose a freshness
-        // lifetime greater than 24 hours and the response's age is greater than 24 hours.
-        if (
-            age > 3600 * 24 &&
-            !this._hasExplicitExpiration() &&
-            this.maxAge() > 3600 * 24
-        ) {
-            headers.warning =
-                (headers.warning ? `${headers.warning}, ` : '') +
-                '113 - "rfc7234 5.5.4"';
-        }
-        headers.age = `${Math.round(age)}`;
-        headers.date = new Date(this.now()).toUTCString();
-        return headers;
-    }
-
-    /**
-     * Value of the Date response header or current time if Date was invalid
-     * @return timestamp
-     */
-    date() {
-        const serverDate = Date.parse(this._resHeaders.date);
-        if (isFinite(serverDate)) {
-            return serverDate;
-        }
-        return this._responseTime;
-    }
-
-    /**
-     * Value of the Age header, in seconds, updated for the current time.
-     * May be fractional.
-     *
-     * @return Number
-     */
-    age() {
-        let age = this._ageValue();
-
-        const residentTime = (this.now() - this._responseTime) / 1000;
-        return age + residentTime;
-    }
-
-    _ageValue() {
-        return toNumberOrZero(this._resHeaders.age);
-    }
-
-    /**
-     * Value of applicable max-age (or heuristic equivalent) in seconds. This counts since response's `Date`.
-     *
-     * For an up-to-date value, see `timeToLive()`.
-     *
-     * @return Number
-     */
-    maxAge() {
-        if (!this.storable() || this._rescc['no-cache']) {
-            return 0;
-        }
-
-        // Shared responses with cookies are cacheable according to the RFC, but IMHO it'd be unwise to do so by default
-        // so this implementation requires explicit opt-in via public header
-        if (
-            this._isShared &&
-            (this._resHeaders['set-cookie'] &&
-                !this._rescc.public &&
-                !this._rescc.immutable)
-        ) {
-            return 0;
-        }
-
-        if (this._resHeaders.vary === '*') {
-            return 0;
-        }
-
-        if (this._isShared) {
-            if (this._rescc['proxy-revalidate']) {
-                return 0;
-            }
-            // if a response includes the s-maxage directive, a shared cache recipient MUST ignore the Expires field.
-            if (this._rescc['s-maxage']) {
-                return toNumberOrZero(this._rescc['s-maxage']);
-            }
-        }
-
-        // If a response includes a Cache-Control field with the max-age directive, a recipient MUST ignore the Expires field.
-        if (this._rescc['max-age']) {
-            return toNumberOrZero(this._rescc['max-age']);
-        }
-
-        const defaultMinTtl = this._rescc.immutable ? this._immutableMinTtl : 0;
-
-        const serverDate = this.date();
-        if (this._resHeaders.expires) {
-            const expires = Date.parse(this._resHeaders.expires);
-            // A cache recipient MUST interpret invalid date formats, especially the value "0", as representing a time in the past (i.e., "already expired").
-            if (Number.isNaN(expires) || expires < serverDate) {
-                return 0;
-            }
-            return Math.max(defaultMinTtl, (expires - serverDate) / 1000);
-        }
-
-        if (this._resHeaders['last-modified']) {
-            const lastModified = Date.parse(this._resHeaders['last-modified']);
-            if (isFinite(lastModified) && serverDate > lastModified) {
-                return Math.max(
-                    defaultMinTtl,
-                    ((serverDate - lastModified) / 1000) * this._cacheHeuristic
-                );
-            }
-        }
-
-        return defaultMinTtl;
-    }
-
-    timeToLive() {
-        const age = this.maxAge() - this.age();
-        const staleIfErrorAge = age + toNumberOrZero(this._rescc['stale-if-error']);
-        const staleWhileRevalidateAge = age + toNumberOrZero(this._rescc['stale-while-revalidate']);
-        return Math.max(0, age, staleIfErrorAge, staleWhileRevalidateAge) * 1000;
-    }
-
-    stale() {
-        return this.maxAge() <= this.age();
-    }
-
-    _useStaleIfError() {
-        return this.maxAge() + toNumberOrZero(this._rescc['stale-if-error']) > this.age();
-    }
-
-    useStaleWhileRevalidate() {
-        return this.maxAge() + toNumberOrZero(this._rescc['stale-while-revalidate']) > this.age();
-    }
-
-    static fromObject(obj) {
-        return new this(undefined, undefined, { _fromObject: obj });
-    }
-
-    _fromObject(obj) {
-        if (this._responseTime) throw Error('Reinitialized');
-        if (!obj || obj.v !== 1) throw Error('Invalid serialization');
-
-        this._responseTime = obj.t;
-        this._isShared = obj.sh;
-        this._cacheHeuristic = obj.ch;
-        this._immutableMinTtl =
-            obj.imm !== undefined ? obj.imm : 24 * 3600 * 1000;
-        this._status = obj.st;
-        this._resHeaders = obj.resh;
-        this._rescc = obj.rescc;
-        this._method = obj.m;
-        this._url = obj.u;
-        this._host = obj.h;
-        this._noAuthorization = obj.a;
-        this._reqHeaders = obj.reqh;
-        this._reqcc = obj.reqcc;
-    }
-
-    toObject() {
-        return {
-            v: 1,
-            t: this._responseTime,
-            sh: this._isShared,
-            ch: this._cacheHeuristic,
-            imm: this._immutableMinTtl,
-            st: this._status,
-            resh: this._resHeaders,
-            rescc: this._rescc,
-            m: this._method,
-            u: this._url,
-            h: this._host,
-            a: this._noAuthorization,
-            reqh: this._reqHeaders,
-            reqcc: this._reqcc,
-        };
-    }
-
-    /**
-     * Headers for sending to the origin server to revalidate stale response.
-     * Allows server to return 304 to allow reuse of the previous response.
-     *
-     * Hop by hop headers are always stripped.
-     * Revalidation headers may be added or removed, depending on request.
-     */
-    revalidationHeaders(incomingReq) {
-        this._assertRequestHasHeaders(incomingReq);
-        const headers = this._copyWithoutHopByHopHeaders(incomingReq.headers);
-
-        // This implementation does not understand range requests
-        delete headers['if-range'];
-
-        if (!this._requestMatches(incomingReq, true) || !this.storable()) {
-            // revalidation allowed via HEAD
-            // not for the same resource, or wasn't allowed to be cached anyway
-            delete headers['if-none-match'];
-            delete headers['if-modified-since'];
-            return headers;
-        }
-
-        /* MUST send that entity-tag in any cache validation request (using If-Match or If-None-Match) if an entity-tag has been provided by the origin server. */
-        if (this._resHeaders.etag) {
-            headers['if-none-match'] = headers['if-none-match']
-                ? `${headers['if-none-match']}, ${this._resHeaders.etag}`
-                : this._resHeaders.etag;
-        }
-
-        // Clients MAY issue simple (non-subrange) GET requests with either weak validators or strong validators. Clients MUST NOT use weak validators in other forms of request.
-        const forbidsWeakValidators =
-            headers['accept-ranges'] ||
-            headers['if-match'] ||
-            headers['if-unmodified-since'] ||
-            (this._method && this._method != 'GET');
-
-        /* SHOULD send the Last-Modified value in non-subrange cache validation requests (using If-Modified-Since) if only a Last-Modified value has been provided by the origin server.
-        Note: This implementation does not understand partial responses (206) */
-        if (forbidsWeakValidators) {
-            delete headers['if-modified-since'];
-
-            if (headers['if-none-match']) {
-                const etags = headers['if-none-match']
-                    .split(/,/)
-                    .filter(etag => {
-                        return !/^\s*W\//.test(etag);
-                    });
-                if (!etags.length) {
-                    delete headers['if-none-match'];
-                } else {
-                    headers['if-none-match'] = etags.join(',').trim();
-                }
-            }
-        } else if (
-            this._resHeaders['last-modified'] &&
-            !headers['if-modified-since']
-        ) {
-            headers['if-modified-since'] = this._resHeaders['last-modified'];
-        }
-
-        return headers;
-    }
-
-    /**
-     * Creates new CachePolicy with information combined from the previews response,
-     * and the new revalidation response.
-     *
-     * Returns {policy, modified} where modified is a boolean indicating
-     * whether the response body has been modified, and old cached body can't be used.
-     *
-     * @return {Object} {policy: CachePolicy, modified: Boolean}
-     */
-    revalidatedPolicy(request, response) {
-        this._assertRequestHasHeaders(request);
-        if(this._useStaleIfError() && isErrorResponse(response)) {  // I consider the revalidation request unsuccessful
-          return {
-            modified: false,
-            matches: false,
-            policy: this,
-          };
-        }
-        if (!response || !response.headers) {
-            throw Error('Response headers missing');
-        }
-
-        // These aren't going to be supported exactly, since one CachePolicy object
-        // doesn't know about all the other cached objects.
-        let matches = false;
-        if (response.status !== undefined && response.status != 304) {
-            matches = false;
-        } else if (
-            response.headers.etag &&
-            !/^\s*W\//.test(response.headers.etag)
-        ) {
-            // "All of the stored responses with the same strong validator are selected.
-            // If none of the stored responses contain the same strong validator,
-            // then the cache MUST NOT use the new response to update any stored responses."
-            matches =
-                this._resHeaders.etag &&
-                this._resHeaders.etag.replace(/^\s*W\//, '') ===
-                    response.headers.etag;
-        } else if (this._resHeaders.etag && response.headers.etag) {
-            // "If the new response contains a weak validator and that validator corresponds
-            // to one of the cache's stored responses,
-            // then the most recent of those matching stored responses is selected for update."
-            matches =
-                this._resHeaders.etag.replace(/^\s*W\//, '') ===
-                response.headers.etag.replace(/^\s*W\//, '');
-        } else if (this._resHeaders['last-modified']) {
-            matches =
-                this._resHeaders['last-modified'] ===
-                response.headers['last-modified'];
+      }
+      if (identifier) {
+        // 1.2.0-beta.1 bumps to 1.2.0-beta.2,
+        // 1.2.0-beta.fooblz or 1.2.0-beta bumps to 1.2.0-beta.0
+        if (this.prerelease[0] === identifier) {
+          if (isNaN(this.prerelease[1])) {
+            this.prerelease = [identifier, 0]
+          }
         } else {
-            // If the new response does not include any form of validator (such as in the case where
-            // a client generates an If-Modified-Since request from a source other than the Last-Modified
-            // response header field), and there is only one stored response, and that stored response also
-            // lacks a validator, then that stored response is selected for update.
-            if (
-                !this._resHeaders.etag &&
-                !this._resHeaders['last-modified'] &&
-                !response.headers.etag &&
-                !response.headers['last-modified']
-            ) {
-                matches = true;
-            }
+          this.prerelease = [identifier, 0]
         }
+      }
+      break
 
-        if (!matches) {
-            return {
-                policy: new this.constructor(request, response),
-                // Client receiving 304 without body, even if it's invalid/mismatched has no option
-                // but to reuse a cached body. We don't have a good way to tell clients to do
-                // error recovery in such case.
-                modified: response.status != 304,
-                matches: false,
-            };
-        }
+    default:
+      throw new Error('invalid increment argument: ' + release)
+  }
+  this.format()
+  this.raw = this.version
+  return this
+}
 
-        // use other header fields provided in the 304 (Not Modified) response to replace all instances
-        // of the corresponding header fields in the stored response.
-        const headers = {};
-        for (const k in this._resHeaders) {
-            headers[k] =
-                k in response.headers && !excludedFromRevalidationUpdate[k]
-                    ? response.headers[k]
-                    : this._resHeaders[k];
-        }
+exports.inc = inc
+function inc (version, release, loose, identifier) {
+  if (typeof (loose) === 'string') {
+    identifier = loose
+    loose = undefined
+  }
 
-        const newResponse = Object.assign({}, response, {
-            status: this._status,
-            method: this._method,
-            headers,
-        });
-        return {
-            policy: new this.constructor(request, newResponse, {
-                shared: this._isShared,
-                cacheHeuristic: this._cacheHeuristic,
-                immutableMinTimeToLive: this._immutableMinTtl,
-            }),
-            modified: false,
-            matches: true,
-        };
+  try {
+    return new SemVer(version, loose).inc(release, identifier).version
+  } catch (er) {
+    return null
+  }
+}
+
+exports.diff = diff
+function diff (version1, version2) {
+  if (eq(version1, version2)) {
+    return null
+  } else {
+    var v1 = parse(version1)
+    var v2 = parse(version2)
+    var prefix = ''
+    if (v1.prerelease.length || v2.prerelease.length) {
+      prefix = 'pre'
+      var defaultResult = 'prerelease'
     }
-};
-
-
-/***/ }),
-
-/***/ 9898:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-
-// See https://github.com/facebook/jest/issues/2549
-// eslint-disable-next-line node/prefer-global/url
-const {URL} = __nccwpck_require__(7310);
-const EventEmitter = __nccwpck_require__(2361);
-const tls = __nccwpck_require__(4404);
-const http2 = __nccwpck_require__(5158);
-const QuickLRU = __nccwpck_require__(9273);
-const delayAsyncDestroy = __nccwpck_require__(9237);
-
-const kCurrentStreamCount = Symbol('currentStreamCount');
-const kRequest = Symbol('request');
-const kOriginSet = Symbol('cachedOriginSet');
-const kGracefullyClosing = Symbol('gracefullyClosing');
-const kLength = Symbol('length');
-
-const nameKeys = [
-	// Not an Agent option actually
-	'createConnection',
-
-	// `http2.connect()` options
-	'maxDeflateDynamicTableSize',
-	'maxSettings',
-	'maxSessionMemory',
-	'maxHeaderListPairs',
-	'maxOutstandingPings',
-	'maxReservedRemoteStreams',
-	'maxSendHeaderBlockLength',
-	'paddingStrategy',
-	'peerMaxConcurrentStreams',
-	'settings',
-
-	// `tls.connect()` source options
-	'family',
-	'localAddress',
-	'rejectUnauthorized',
-
-	// `tls.connect()` secure context options
-	'pskCallback',
-	'minDHSize',
-
-	// `tls.connect()` destination options
-	// - `servername` is automatically validated, skip it
-	// - `host` and `port` just describe the destination server,
-	'path',
-	'socket',
-
-	// `tls.createSecureContext()` options
-	'ca',
-	'cert',
-	'sigalgs',
-	'ciphers',
-	'clientCertEngine',
-	'crl',
-	'dhparam',
-	'ecdhCurve',
-	'honorCipherOrder',
-	'key',
-	'privateKeyEngine',
-	'privateKeyIdentifier',
-	'maxVersion',
-	'minVersion',
-	'pfx',
-	'secureOptions',
-	'secureProtocol',
-	'sessionIdContext',
-	'ticketKeys'
-];
-
-const getSortedIndex = (array, value, compare) => {
-	let low = 0;
-	let high = array.length;
-
-	while (low < high) {
-		const mid = (low + high) >>> 1;
-
-		if (compare(array[mid], value)) {
-			low = mid + 1;
-		} else {
-			high = mid;
-		}
-	}
-
-	return low;
-};
-
-const compareSessions = (a, b) => a.remoteSettings.maxConcurrentStreams > b.remoteSettings.maxConcurrentStreams;
-
-// See https://tools.ietf.org/html/rfc8336
-const closeCoveredSessions = (where, session) => {
-	// Clients SHOULD NOT emit new requests on any connection whose Origin
-	// Set is a proper subset of another connection's Origin Set, and they
-	// SHOULD close it once all outstanding requests are satisfied.
-	for (let index = 0; index < where.length; index++) {
-		const coveredSession = where[index];
-
-		if (
-			// Unfortunately `.every()` returns true for an empty array
-			coveredSession[kOriginSet].length > 0
-
-			// The set is a proper subset when its length is less than the other set.
-			&& coveredSession[kOriginSet].length < session[kOriginSet].length
-
-			// And the other set includes all elements of the subset.
-			&& coveredSession[kOriginSet].every(origin => session[kOriginSet].includes(origin))
-
-			// Makes sure that the session can handle all requests from the covered session.
-			&& (coveredSession[kCurrentStreamCount] + session[kCurrentStreamCount]) <= session.remoteSettings.maxConcurrentStreams
-		) {
-			// This allows pending requests to finish and prevents making new requests.
-			gracefullyClose(coveredSession);
-		}
-	}
-};
-
-// This is basically inverted `closeCoveredSessions(...)`.
-const closeSessionIfCovered = (where, coveredSession) => {
-	for (let index = 0; index < where.length; index++) {
-		const session = where[index];
-
-		if (
-			coveredSession[kOriginSet].length > 0
-			&& coveredSession[kOriginSet].length < session[kOriginSet].length
-			&& coveredSession[kOriginSet].every(origin => session[kOriginSet].includes(origin))
-			&& (coveredSession[kCurrentStreamCount] + session[kCurrentStreamCount]) <= session.remoteSettings.maxConcurrentStreams
-		) {
-			gracefullyClose(coveredSession);
-
-			return true;
-		}
-	}
-
-	return false;
-};
-
-const gracefullyClose = session => {
-	session[kGracefullyClosing] = true;
-
-	if (session[kCurrentStreamCount] === 0) {
-		session.close();
-	}
-};
-
-class Agent extends EventEmitter {
-	constructor({timeout = 0, maxSessions = Number.POSITIVE_INFINITY, maxEmptySessions = 10, maxCachedTlsSessions = 100} = {}) {
-		super();
-
-		// SESSIONS[NORMALIZED_OPTIONS] = [];
-		this.sessions = {};
-
-		// The queue for creating new sessions. It looks like this:
-		// QUEUE[NORMALIZED_OPTIONS][NORMALIZED_ORIGIN] = ENTRY_FUNCTION
-		//
-		// It's faster when there are many origins. If there's only one, then QUEUE[`${options}:${origin}`] is faster.
-		// I guess object creation / deletion is causing the slowdown.
-		//
-		// The entry function has `listeners`, `completed` and `destroyed` properties.
-		// `listeners` is an array of objects containing `resolve` and `reject` functions.
-		// `completed` is a boolean. It's set to true after ENTRY_FUNCTION is executed.
-		// `destroyed` is a boolean. If it's set to true, the session will be destroyed if hasn't connected yet.
-		this.queue = {};
-
-		// Each session will use this timeout value.
-		this.timeout = timeout;
-
-		// Max sessions in total
-		this.maxSessions = maxSessions;
-
-		// Max empty sessions in total
-		this.maxEmptySessions = maxEmptySessions;
-
-		this._emptySessionCount = 0;
-		this._sessionCount = 0;
-
-		// We don't support push streams by default.
-		this.settings = {
-			enablePush: false,
-			initialWindowSize: 1024 * 1024 * 32 // 32MB, see https://github.com/nodejs/node/issues/38426
-		};
-
-		// Reusing TLS sessions increases performance.
-		this.tlsSessionCache = new QuickLRU({maxSize: maxCachedTlsSessions});
-	}
-
-	get protocol() {
-		return 'https:';
-	}
-
-	normalizeOptions(options) {
-		let normalized = '';
-
-		for (let index = 0; index < nameKeys.length; index++) {
-			const key = nameKeys[index];
-
-			normalized += ':';
-
-			if (options && options[key] !== undefined) {
-				normalized += options[key];
-			}
-		}
-
-		return normalized;
-	}
-
-	_processQueue() {
-		if (this._sessionCount >= this.maxSessions) {
-			this.closeEmptySessions(this.maxSessions - this._sessionCount + 1);
-			return;
-		}
-
-		// eslint-disable-next-line guard-for-in
-		for (const normalizedOptions in this.queue) {
-			// eslint-disable-next-line guard-for-in
-			for (const normalizedOrigin in this.queue[normalizedOptions]) {
-				const item = this.queue[normalizedOptions][normalizedOrigin];
-
-				// The entry function can be run only once.
-				if (!item.completed) {
-					item.completed = true;
-
-					item();
-				}
-			}
-		}
-	}
-
-	_isBetterSession(thisStreamCount, thatStreamCount) {
-		return thisStreamCount > thatStreamCount;
-	}
-
-	_accept(session, listeners, normalizedOrigin, options) {
-		let index = 0;
-
-		while (index < listeners.length && session[kCurrentStreamCount] < session.remoteSettings.maxConcurrentStreams) {
-			// We assume `resolve(...)` calls `request(...)` *directly*,
-			// otherwise the session will get overloaded.
-			listeners[index].resolve(session);
-
-			index++;
-		}
-
-		listeners.splice(0, index);
-
-		if (listeners.length > 0) {
-			this.getSession(normalizedOrigin, options, listeners);
-			listeners.length = 0;
-		}
-	}
-
-	getSession(origin, options, listeners) {
-		return new Promise((resolve, reject) => {
-			if (Array.isArray(listeners) && listeners.length > 0) {
-				listeners = [...listeners];
-
-				// Resolve the current promise ASAP, we're just moving the listeners.
-				// They will be executed at a different time.
-				resolve();
-			} else {
-				listeners = [{resolve, reject}];
-			}
-
-			try {
-				// Parse origin
-				if (typeof origin === 'string') {
-					origin = new URL(origin);
-				} else if (!(origin instanceof URL)) {
-					throw new TypeError('The `origin` argument needs to be a string or an URL object');
-				}
-
-				if (options) {
-					// Validate servername
-					const {servername} = options;
-					const {hostname} = origin;
-					if (servername && hostname !== servername) {
-						throw new Error(`Origin ${hostname} differs from servername ${servername}`);
-					}
-				}
-			} catch (error) {
-				for (let index = 0; index < listeners.length; index++) {
-					listeners[index].reject(error);
-				}
-
-				return;
-			}
-
-			const normalizedOptions = this.normalizeOptions(options);
-			const normalizedOrigin = origin.origin;
-
-			if (normalizedOptions in this.sessions) {
-				const sessions = this.sessions[normalizedOptions];
-
-				let maxConcurrentStreams = -1;
-				let currentStreamsCount = -1;
-				let optimalSession;
-
-				// We could just do this.sessions[normalizedOptions].find(...) but that isn't optimal.
-				// Additionally, we are looking for session which has biggest current pending streams count.
-				//
-				// |------------| |------------| |------------| |------------|
-				// | Session: A | | Session: B | | Session: C | | Session: D |
-				// | Pending: 5 |-| Pending: 8 |-| Pending: 9 |-| Pending: 4 |
-				// | Max:    10 | | Max:    10 | | Max:     9 | | Max:     5 |
-				// |------------| |------------| |------------| |------------|
-				//                     ^
-				//                     |
-				//     pick this one  --
-				//
-				for (let index = 0; index < sessions.length; index++) {
-					const session = sessions[index];
-
-					const sessionMaxConcurrentStreams = session.remoteSettings.maxConcurrentStreams;
-
-					if (sessionMaxConcurrentStreams < maxConcurrentStreams) {
-						break;
-					}
-
-					if (!session[kOriginSet].includes(normalizedOrigin)) {
-						continue;
-					}
-
-					const sessionCurrentStreamsCount = session[kCurrentStreamCount];
-
-					if (
-						sessionCurrentStreamsCount >= sessionMaxConcurrentStreams
-						|| session[kGracefullyClosing]
-						// Unfortunately the `close` event isn't called immediately,
-						// so `session.destroyed` is `true`, but `session.closed` is `false`.
-						|| session.destroyed
-					) {
-						continue;
-					}
-
-					// We only need set this once.
-					if (!optimalSession) {
-						maxConcurrentStreams = sessionMaxConcurrentStreams;
-					}
-
-					// Either get the session which has biggest current stream count or the lowest.
-					if (this._isBetterSession(sessionCurrentStreamsCount, currentStreamsCount)) {
-						optimalSession = session;
-						currentStreamsCount = sessionCurrentStreamsCount;
-					}
-				}
-
-				if (optimalSession) {
-					this._accept(optimalSession, listeners, normalizedOrigin, options);
-					return;
-				}
-			}
-
-			if (normalizedOptions in this.queue) {
-				if (normalizedOrigin in this.queue[normalizedOptions]) {
-					// There's already an item in the queue, just attach ourselves to it.
-					this.queue[normalizedOptions][normalizedOrigin].listeners.push(...listeners);
-					return;
-				}
-			} else {
-				this.queue[normalizedOptions] = {
-					[kLength]: 0
-				};
-			}
-
-			// The entry must be removed from the queue IMMEDIATELY when:
-			// 1. the session connects successfully,
-			// 2. an error occurs.
-			const removeFromQueue = () => {
-				// Our entry can be replaced. We cannot remove the new one.
-				if (normalizedOptions in this.queue && this.queue[normalizedOptions][normalizedOrigin] === entry) {
-					delete this.queue[normalizedOptions][normalizedOrigin];
-
-					if (--this.queue[normalizedOptions][kLength] === 0) {
-						delete this.queue[normalizedOptions];
-					}
-				}
-			};
-
-			// The main logic is here
-			const entry = async () => {
-				this._sessionCount++;
-
-				const name = `${normalizedOrigin}:${normalizedOptions}`;
-				let receivedSettings = false;
-				let socket;
-
-				try {
-					const computedOptions = {...options};
-
-					if (computedOptions.settings === undefined) {
-						computedOptions.settings = this.settings;
-					}
-
-					if (computedOptions.session === undefined) {
-						computedOptions.session = this.tlsSessionCache.get(name);
-					}
-
-					const createConnection = computedOptions.createConnection || this.createConnection;
-
-					// A hacky workaround to enable async `createConnection`
-					socket = await createConnection.call(this, origin, computedOptions);
-					computedOptions.createConnection = () => socket;
-
-					const session = http2.connect(origin, computedOptions);
-					session[kCurrentStreamCount] = 0;
-					session[kGracefullyClosing] = false;
-
-					// Node.js return https://false:443 instead of https://1.1.1.1:443
-					const getOriginSet = () => {
-						const {socket} = session;
-
-						let originSet;
-						if (socket.servername === false) {
-							socket.servername = socket.remoteAddress;
-							originSet = session.originSet;
-							socket.servername = false;
-						} else {
-							originSet = session.originSet;
-						}
-
-						return originSet;
-					};
-
-					const isFree = () => session[kCurrentStreamCount] < session.remoteSettings.maxConcurrentStreams;
-
-					session.socket.once('session', tlsSession => {
-						this.tlsSessionCache.set(name, tlsSession);
-					});
-
-					session.once('error', error => {
-						// Listeners are empty when the session successfully connected.
-						for (let index = 0; index < listeners.length; index++) {
-							listeners[index].reject(error);
-						}
-
-						// The connection got broken, purge the cache.
-						this.tlsSessionCache.delete(name);
-					});
-
-					session.setTimeout(this.timeout, () => {
-						// Terminates all streams owned by this session.
-						session.destroy();
-					});
-
-					session.once('close', () => {
-						this._sessionCount--;
-
-						if (receivedSettings) {
-							// Assumes session `close` is emitted after request `close`
-							this._emptySessionCount--;
-
-							// This cannot be moved to the stream logic,
-							// because there may be a session that hadn't made a single request.
-							const where = this.sessions[normalizedOptions];
-
-							if (where.length === 1) {
-								delete this.sessions[normalizedOptions];
-							} else {
-								where.splice(where.indexOf(session), 1);
-							}
-						} else {
-							// Broken connection
-							removeFromQueue();
-
-							const error = new Error('Session closed without receiving a SETTINGS frame');
-							error.code = 'HTTP2WRAPPER_NOSETTINGS';
-
-							for (let index = 0; index < listeners.length; index++) {
-								listeners[index].reject(error);
-							}
-						}
-
-						// There may be another session awaiting.
-						this._processQueue();
-					});
-
-					// Iterates over the queue and processes listeners.
-					const processListeners = () => {
-						const queue = this.queue[normalizedOptions];
-						if (!queue) {
-							return;
-						}
-
-						const originSet = session[kOriginSet];
-
-						for (let index = 0; index < originSet.length; index++) {
-							const origin = originSet[index];
-
-							if (origin in queue) {
-								const {listeners, completed} = queue[origin];
-
-								let index = 0;
-
-								// Prevents session overloading.
-								while (index < listeners.length && isFree()) {
-									// We assume `resolve(...)` calls `request(...)` *directly*,
-									// otherwise the session will get overloaded.
-									listeners[index].resolve(session);
-
-									index++;
-								}
-
-								queue[origin].listeners.splice(0, index);
-
-								if (queue[origin].listeners.length === 0 && !completed) {
-									delete queue[origin];
-
-									if (--queue[kLength] === 0) {
-										delete this.queue[normalizedOptions];
-										break;
-									}
-								}
-
-								// We're no longer free, no point in continuing.
-								if (!isFree()) {
-									break;
-								}
-							}
-						}
-					};
-
-					// The Origin Set cannot shrink. No need to check if it suddenly became covered by another one.
-					session.on('origin', () => {
-						session[kOriginSet] = getOriginSet() || [];
-						session[kGracefullyClosing] = false;
-						closeSessionIfCovered(this.sessions[normalizedOptions], session);
-
-						if (session[kGracefullyClosing] || !isFree()) {
-							return;
-						}
-
-						processListeners();
-
-						if (!isFree()) {
-							return;
-						}
-
-						// Close covered sessions (if possible).
-						closeCoveredSessions(this.sessions[normalizedOptions], session);
-					});
-
-					session.once('remoteSettings', () => {
-						// The Agent could have been destroyed already.
-						if (entry.destroyed) {
-							const error = new Error('Agent has been destroyed');
-
-							for (let index = 0; index < listeners.length; index++) {
-								listeners[index].reject(error);
-							}
-
-							session.destroy();
-							return;
-						}
-
-						// See https://github.com/nodejs/node/issues/38426
-						if (session.setLocalWindowSize) {
-							session.setLocalWindowSize(1024 * 1024 * 4); // 4 MB
-						}
-
-						session[kOriginSet] = getOriginSet() || [];
-
-						if (session.socket.encrypted) {
-							const mainOrigin = session[kOriginSet][0];
-							if (mainOrigin !== normalizedOrigin) {
-								const error = new Error(`Requested origin ${normalizedOrigin} does not match server ${mainOrigin}`);
-
-								for (let index = 0; index < listeners.length; index++) {
-									listeners[index].reject(error);
-								}
-
-								session.destroy();
-								return;
-							}
-						}
-
-						removeFromQueue();
-
-						{
-							const where = this.sessions;
-
-							if (normalizedOptions in where) {
-								const sessions = where[normalizedOptions];
-								sessions.splice(getSortedIndex(sessions, session, compareSessions), 0, session);
-							} else {
-								where[normalizedOptions] = [session];
-							}
-						}
-
-						receivedSettings = true;
-						this._emptySessionCount++;
-
-						this.emit('session', session);
-						this._accept(session, listeners, normalizedOrigin, options);
-
-						if (session[kCurrentStreamCount] === 0 && this._emptySessionCount > this.maxEmptySessions) {
-							this.closeEmptySessions(this._emptySessionCount - this.maxEmptySessions);
-						}
-
-						// `session.remoteSettings.maxConcurrentStreams` might get increased
-						session.on('remoteSettings', () => {
-							if (!isFree()) {
-								return;
-							}
-
-							processListeners();
-
-							if (!isFree()) {
-								return;
-							}
-
-							// In case the Origin Set changes
-							closeCoveredSessions(this.sessions[normalizedOptions], session);
-						});
-					});
-
-					// Shim `session.request()` in order to catch all streams
-					session[kRequest] = session.request;
-					session.request = (headers, streamOptions) => {
-						if (session[kGracefullyClosing]) {
-							throw new Error('The session is gracefully closing. No new streams are allowed.');
-						}
-
-						const stream = session[kRequest](headers, streamOptions);
-
-						// The process won't exit until the session is closed or all requests are gone.
-						session.ref();
-
-						if (session[kCurrentStreamCount]++ === 0) {
-							this._emptySessionCount--;
-						}
-
-						stream.once('close', () => {
-							if (--session[kCurrentStreamCount] === 0) {
-								this._emptySessionCount++;
-								session.unref();
-
-								if (this._emptySessionCount > this.maxEmptySessions || session[kGracefullyClosing]) {
-									session.close();
-									return;
-								}
-							}
-
-							if (session.destroyed || session.closed) {
-								return;
-							}
-
-							if (isFree() && !closeSessionIfCovered(this.sessions[normalizedOptions], session)) {
-								closeCoveredSessions(this.sessions[normalizedOptions], session);
-								processListeners();
-
-								if (session[kCurrentStreamCount] === 0) {
-									this._processQueue();
-								}
-							}
-						});
-
-						return stream;
-					};
-				} catch (error) {
-					removeFromQueue();
-					this._sessionCount--;
-
-					for (let index = 0; index < listeners.length; index++) {
-						listeners[index].reject(error);
-					}
-				}
-			};
-
-			entry.listeners = listeners;
-			entry.completed = false;
-			entry.destroyed = false;
-
-			this.queue[normalizedOptions][normalizedOrigin] = entry;
-			this.queue[normalizedOptions][kLength]++;
-			this._processQueue();
-		});
-	}
-
-	request(origin, options, headers, streamOptions) {
-		return new Promise((resolve, reject) => {
-			this.getSession(origin, options, [{
-				reject,
-				resolve: session => {
-					try {
-						const stream = session.request(headers, streamOptions);
-
-						// Do not throw before `request(...)` has been awaited
-						delayAsyncDestroy(stream);
-
-						resolve(stream);
-					} catch (error) {
-						reject(error);
-					}
-				}
-			}]);
-		});
-	}
-
-	async createConnection(origin, options) {
-		return Agent.connect(origin, options);
-	}
-
-	static connect(origin, options) {
-		options.ALPNProtocols = ['h2'];
-
-		const port = origin.port || 443;
-		const host = origin.hostname;
-
-		if (typeof options.servername === 'undefined') {
-			options.servername = host;
-		}
-
-		const socket = tls.connect(port, host, options);
-
-		if (options.socket) {
-			socket._peername = {
-				family: undefined,
-				address: undefined,
-				port
-			};
-		}
-
-		return socket;
-	}
-
-	closeEmptySessions(maxCount = Number.POSITIVE_INFINITY) {
-		let closedCount = 0;
-
-		const {sessions} = this;
-
-		// eslint-disable-next-line guard-for-in
-		for (const key in sessions) {
-			const thisSessions = sessions[key];
-
-			for (let index = 0; index < thisSessions.length; index++) {
-				const session = thisSessions[index];
-
-				if (session[kCurrentStreamCount] === 0) {
-					closedCount++;
-					session.close();
-
-					if (closedCount >= maxCount) {
-						return closedCount;
-					}
-				}
-			}
-		}
-
-		return closedCount;
-	}
-
-	destroy(reason) {
-		const {sessions, queue} = this;
-
-		// eslint-disable-next-line guard-for-in
-		for (const key in sessions) {
-			const thisSessions = sessions[key];
-
-			for (let index = 0; index < thisSessions.length; index++) {
-				thisSessions[index].destroy(reason);
-			}
-		}
-
-		// eslint-disable-next-line guard-for-in
-		for (const normalizedOptions in queue) {
-			const entries = queue[normalizedOptions];
-
-			// eslint-disable-next-line guard-for-in
-			for (const normalizedOrigin in entries) {
-				entries[normalizedOrigin].destroyed = true;
-			}
-		}
-
-		// New requests should NOT attach to destroyed sessions
-		this.queue = {};
-		this.tlsSessionCache.clear();
-	}
-
-	get emptySessionCount() {
-		return this._emptySessionCount;
-	}
-
-	get pendingSessionCount() {
-		return this._sessionCount - this._emptySessionCount;
-	}
-
-	get sessionCount() {
-		return this._sessionCount;
-	}
+    for (var key in v1) {
+      if (key === 'major' || key === 'minor' || key === 'patch') {
+        if (v1[key] !== v2[key]) {
+          return prefix + key
+        }
+      }
+    }
+    return defaultResult // may be undefined
+  }
 }
 
-Agent.kCurrentStreamCount = kCurrentStreamCount;
-Agent.kGracefullyClosing = kGracefullyClosing;
-
-module.exports = {
-	Agent,
-	globalAgent: new Agent()
-};
-
-
-/***/ }),
-
-/***/ 7167:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-
-// See https://github.com/facebook/jest/issues/2549
-// eslint-disable-next-line node/prefer-global/url
-const {URL, urlToHttpOptions} = __nccwpck_require__(7310);
-const http = __nccwpck_require__(3685);
-const https = __nccwpck_require__(5687);
-const resolveALPN = __nccwpck_require__(6624);
-const QuickLRU = __nccwpck_require__(9273);
-const {Agent, globalAgent} = __nccwpck_require__(9898);
-const Http2ClientRequest = __nccwpck_require__(9632);
-const calculateServerName = __nccwpck_require__(1982);
-const delayAsyncDestroy = __nccwpck_require__(9237);
-
-const cache = new QuickLRU({maxSize: 100});
-const queue = new Map();
-
-const installSocket = (agent, socket, options) => {
-	socket._httpMessage = {shouldKeepAlive: true};
-
-	const onFree = () => {
-		agent.emit('free', socket, options);
-	};
-
-	socket.on('free', onFree);
-
-	const onClose = () => {
-		agent.removeSocket(socket, options);
-	};
-
-	socket.on('close', onClose);
-
-	const onTimeout = () => {
-		const {freeSockets} = agent;
-
-		for (const sockets of Object.values(freeSockets)) {
-			if (sockets.includes(socket)) {
-				socket.destroy();
-				return;
-			}
-		}
-	};
-
-	socket.on('timeout', onTimeout);
-
-	const onRemove = () => {
-		agent.removeSocket(socket, options);
-		socket.off('close', onClose);
-		socket.off('free', onFree);
-		socket.off('timeout', onTimeout);
-		socket.off('agentRemove', onRemove);
-	};
-
-	socket.on('agentRemove', onRemove);
-
-	agent.emit('free', socket, options);
-};
-
-const createResolveProtocol = (cache, queue = new Map(), connect = undefined) => {
-	return async options => {
-		const name = `${options.host}:${options.port}:${options.ALPNProtocols.sort()}`;
-
-		if (!cache.has(name)) {
-			if (queue.has(name)) {
-				const result = await queue.get(name);
-				return {alpnProtocol: result.alpnProtocol};
-			}
-
-			const {path} = options;
-			options.path = options.socketPath;
-
-			const resultPromise = resolveALPN(options, connect);
-			queue.set(name, resultPromise);
-
-			try {
-				const result = await resultPromise;
-
-				cache.set(name, result.alpnProtocol);
-				queue.delete(name);
-
-				options.path = path;
-
-				return result;
-			} catch (error) {
-				queue.delete(name);
-
-				options.path = path;
-
-				throw error;
-			}
-		}
-
-		return {alpnProtocol: cache.get(name)};
-	};
-};
-
-const defaultResolveProtocol = createResolveProtocol(cache, queue);
-
-module.exports = async (input, options, callback) => {
-	if (typeof input === 'string') {
-		input = urlToHttpOptions(new URL(input));
-	} else if (input instanceof URL) {
-		input = urlToHttpOptions(input);
-	} else {
-		input = {...input};
-	}
-
-	if (typeof options === 'function' || options === undefined) {
-		// (options, callback)
-		callback = options;
-		options = input;
-	} else {
-		// (input, options, callback)
-		options = Object.assign(input, options);
-	}
-
-	options.ALPNProtocols = options.ALPNProtocols || ['h2', 'http/1.1'];
-
-	if (!Array.isArray(options.ALPNProtocols) || options.ALPNProtocols.length === 0) {
-		throw new Error('The `ALPNProtocols` option must be an Array with at least one entry');
-	}
-
-	options.protocol = options.protocol || 'https:';
-	const isHttps = options.protocol === 'https:';
-
-	options.host = options.hostname || options.host || 'localhost';
-	options.session = options.tlsSession;
-	options.servername = options.servername || calculateServerName((options.headers && options.headers.host) || options.host);
-	options.port = options.port || (isHttps ? 443 : 80);
-	options._defaultAgent = isHttps ? https.globalAgent : http.globalAgent;
-
-	const resolveProtocol = options.resolveProtocol || defaultResolveProtocol;
-
-	// Note: We don't support `h2session` here
-
-	let {agent} = options;
-	if (agent !== undefined && agent !== false && agent.constructor.name !== 'Object') {
-		throw new Error('The `options.agent` can be only an object `http`, `https` or `http2` properties');
-	}
-
-	if (isHttps) {
-		options.resolveSocket = true;
-
-		let {socket, alpnProtocol, timeout} = await resolveProtocol(options);
-
-		if (timeout) {
-			if (socket) {
-				socket.destroy();
-			}
-
-			const error = new Error(`Timed out resolving ALPN: ${options.timeout} ms`);
-			error.code = 'ETIMEDOUT';
-			error.ms = options.timeout;
-
-			throw error;
-		}
-
-		// We can't accept custom `createConnection` because the API is different for HTTP/2
-		if (socket && options.createConnection) {
-			socket.destroy();
-			socket = undefined;
-		}
-
-		delete options.resolveSocket;
-
-		const isHttp2 = alpnProtocol === 'h2';
-
-		if (agent) {
-			agent = isHttp2 ? agent.http2 : agent.https;
-			options.agent = agent;
-		}
-
-		if (agent === undefined) {
-			agent = isHttp2 ? globalAgent : https.globalAgent;
-		}
-
-		if (socket) {
-			if (agent === false) {
-				socket.destroy();
-			} else {
-				const defaultCreateConnection = (isHttp2 ? Agent : https.Agent).prototype.createConnection;
-
-				if (agent.createConnection === defaultCreateConnection) {
-					if (isHttp2) {
-						options._reuseSocket = socket;
-					} else {
-						installSocket(agent, socket, options);
-					}
-				} else {
-					socket.destroy();
-				}
-			}
-		}
-
-		if (isHttp2) {
-			return delayAsyncDestroy(new Http2ClientRequest(options, callback));
-		}
-	} else if (agent) {
-		options.agent = agent.http;
-	}
-
-	return delayAsyncDestroy(http.request(options, callback));
-};
-
-module.exports.protocolCache = cache;
-module.exports.resolveProtocol = defaultResolveProtocol;
-module.exports.createResolveProtocol = createResolveProtocol;
-
-
-/***/ }),
-
-/***/ 9632:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-
-// See https://github.com/facebook/jest/issues/2549
-// eslint-disable-next-line node/prefer-global/url
-const {URL, urlToHttpOptions} = __nccwpck_require__(7310);
-const http2 = __nccwpck_require__(5158);
-const {Writable} = __nccwpck_require__(2781);
-const {Agent, globalAgent} = __nccwpck_require__(9898);
-const IncomingMessage = __nccwpck_require__(2575);
-const proxyEvents = __nccwpck_require__(1818);
-const {
-	ERR_INVALID_ARG_TYPE,
-	ERR_INVALID_PROTOCOL,
-	ERR_HTTP_HEADERS_SENT
-} = __nccwpck_require__(7087);
-const validateHeaderName = __nccwpck_require__(4592);
-const validateHeaderValue = __nccwpck_require__(3549);
-const proxySocketHandler = __nccwpck_require__(9404);
-
-const {
-	HTTP2_HEADER_STATUS,
-	HTTP2_HEADER_METHOD,
-	HTTP2_HEADER_PATH,
-	HTTP2_HEADER_AUTHORITY,
-	HTTP2_METHOD_CONNECT
-} = http2.constants;
-
-const kHeaders = Symbol('headers');
-const kOrigin = Symbol('origin');
-const kSession = Symbol('session');
-const kOptions = Symbol('options');
-const kFlushedHeaders = Symbol('flushedHeaders');
-const kJobs = Symbol('jobs');
-const kPendingAgentPromise = Symbol('pendingAgentPromise');
-
-class ClientRequest extends Writable {
-	constructor(input, options, callback) {
-		super({
-			autoDestroy: false,
-			emitClose: false
-		});
-
-		if (typeof input === 'string') {
-			input = urlToHttpOptions(new URL(input));
-		} else if (input instanceof URL) {
-			input = urlToHttpOptions(input);
-		} else {
-			input = {...input};
-		}
-
-		if (typeof options === 'function' || options === undefined) {
-			// (options, callback)
-			callback = options;
-			options = input;
-		} else {
-			// (input, options, callback)
-			options = Object.assign(input, options);
-		}
-
-		if (options.h2session) {
-			this[kSession] = options.h2session;
-
-			if (this[kSession].destroyed) {
-				throw new Error('The session has been closed already');
-			}
-
-			this.protocol = this[kSession].socket.encrypted ? 'https:' : 'http:';
-		} else if (options.agent === false) {
-			this.agent = new Agent({maxEmptySessions: 0});
-		} else if (typeof options.agent === 'undefined' || options.agent === null) {
-			this.agent = globalAgent;
-		} else if (typeof options.agent.request === 'function') {
-			this.agent = options.agent;
-		} else {
-			throw new ERR_INVALID_ARG_TYPE('options.agent', ['http2wrapper.Agent-like Object', 'undefined', 'false'], options.agent);
-		}
-
-		if (this.agent) {
-			this.protocol = this.agent.protocol;
-		}
-
-		if (options.protocol && options.protocol !== this.protocol) {
-			throw new ERR_INVALID_PROTOCOL(options.protocol, this.protocol);
-		}
-
-		if (!options.port) {
-			options.port = options.defaultPort || (this.agent && this.agent.defaultPort) || 443;
-		}
-
-		options.host = options.hostname || options.host || 'localhost';
-
-		// Unused
-		delete options.hostname;
-
-		const {timeout} = options;
-		options.timeout = undefined;
-
-		this[kHeaders] = Object.create(null);
-		this[kJobs] = [];
-
-		this[kPendingAgentPromise] = undefined;
-
-		this.socket = null;
-		this.connection = null;
-
-		this.method = options.method || 'GET';
-
-		if (!(this.method === 'CONNECT' && (options.path === '/' || options.path === undefined))) {
-			this.path = options.path;
-		}
-
-		this.res = null;
-		this.aborted = false;
-		this.reusedSocket = false;
-
-		const {headers} = options;
-		if (headers) {
-			// eslint-disable-next-line guard-for-in
-			for (const header in headers) {
-				this.setHeader(header, headers[header]);
-			}
-		}
-
-		if (options.auth && !('authorization' in this[kHeaders])) {
-			this[kHeaders].authorization = 'Basic ' + Buffer.from(options.auth).toString('base64');
-		}
-
-		options.session = options.tlsSession;
-		options.path = options.socketPath;
-
-		this[kOptions] = options;
-
-		// Clients that generate HTTP/2 requests directly SHOULD use the :authority pseudo-header field instead of the Host header field.
-		this[kOrigin] = new URL(`${this.protocol}//${options.servername || options.host}:${options.port}`);
-
-		// A socket is being reused
-		const reuseSocket = options._reuseSocket;
-		if (reuseSocket) {
-			options.createConnection = (...args) => {
-				if (reuseSocket.destroyed) {
-					return this.agent.createConnection(...args);
-				}
-
-				return reuseSocket;
-			};
-
-			// eslint-disable-next-line promise/prefer-await-to-then
-			this.agent.getSession(this[kOrigin], this[kOptions]).catch(() => {});
-		}
-
-		if (timeout) {
-			this.setTimeout(timeout);
-		}
-
-		if (callback) {
-			this.once('response', callback);
-		}
-
-		this[kFlushedHeaders] = false;
-	}
-
-	get method() {
-		return this[kHeaders][HTTP2_HEADER_METHOD];
-	}
-
-	set method(value) {
-		if (value) {
-			this[kHeaders][HTTP2_HEADER_METHOD] = value.toUpperCase();
-		}
-	}
-
-	get path() {
-		const header = this.method === 'CONNECT' ? HTTP2_HEADER_AUTHORITY : HTTP2_HEADER_PATH;
-
-		return this[kHeaders][header];
-	}
-
-	set path(value) {
-		if (value) {
-			const header = this.method === 'CONNECT' ? HTTP2_HEADER_AUTHORITY : HTTP2_HEADER_PATH;
-
-			this[kHeaders][header] = value;
-		}
-	}
-
-	get host() {
-		return this[kOrigin].hostname;
-	}
-
-	set host(_value) {
-		// Do nothing as this is read only.
-	}
-
-	get _mustNotHaveABody() {
-		return this.method === 'GET' || this.method === 'HEAD' || this.method === 'DELETE';
-	}
-
-	_write(chunk, encoding, callback) {
-		// https://github.com/nodejs/node/blob/654df09ae0c5e17d1b52a900a545f0664d8c7627/lib/internal/http2/util.js#L148-L156
-		if (this._mustNotHaveABody) {
-			callback(new Error('The GET, HEAD and DELETE methods must NOT have a body'));
-			/* istanbul ignore next: Node.js 12 throws directly */
-			return;
-		}
-
-		this.flushHeaders();
-
-		const callWrite = () => this._request.write(chunk, encoding, callback);
-		if (this._request) {
-			callWrite();
-		} else {
-			this[kJobs].push(callWrite);
-		}
-	}
-
-	_final(callback) {
-		this.flushHeaders();
-
-		const callEnd = () => {
-			// For GET, HEAD and DELETE and CONNECT
-			if (this._mustNotHaveABody || this.method === 'CONNECT') {
-				callback();
-				return;
-			}
-
-			this._request.end(callback);
-		};
-
-		if (this._request) {
-			callEnd();
-		} else {
-			this[kJobs].push(callEnd);
-		}
-	}
-
-	abort() {
-		if (this.res && this.res.complete) {
-			return;
-		}
-
-		if (!this.aborted) {
-			process.nextTick(() => this.emit('abort'));
-		}
-
-		this.aborted = true;
-
-		this.destroy();
-	}
-
-	async _destroy(error, callback) {
-		if (this.res) {
-			this.res._dump();
-		}
-
-		if (this._request) {
-			this._request.destroy();
-		} else {
-			process.nextTick(() => {
-				this.emit('close');
-			});
-		}
-
-		try {
-			await this[kPendingAgentPromise];
-		} catch (internalError) {
-			if (this.aborted) {
-				error = internalError;
-			}
-		}
-
-		callback(error);
-	}
-
-	async flushHeaders() {
-		if (this[kFlushedHeaders] || this.destroyed) {
-			return;
-		}
-
-		this[kFlushedHeaders] = true;
-
-		const isConnectMethod = this.method === HTTP2_METHOD_CONNECT;
-
-		// The real magic is here
-		const onStream = stream => {
-			this._request = stream;
-
-			if (this.destroyed) {
-				stream.destroy();
-				return;
-			}
-
-			// Forwards `timeout`, `continue`, `close` and `error` events to this instance.
-			if (!isConnectMethod) {
-				// TODO: Should we proxy `close` here?
-				proxyEvents(stream, this, ['timeout', 'continue']);
-			}
-
-			stream.once('error', error => {
-				this.destroy(error);
-			});
-
-			stream.once('aborted', () => {
-				const {res} = this;
-				if (res) {
-					res.aborted = true;
-					res.emit('aborted');
-					res.destroy();
-				} else {
-					this.destroy(new Error('The server aborted the HTTP/2 stream'));
-				}
-			});
-
-			const onResponse = (headers, flags, rawHeaders) => {
-				// If we were to emit raw request stream, it would be as fast as the native approach.
-				// Note that wrapping the raw stream in a Proxy instance won't improve the performance (already tested it).
-				const response = new IncomingMessage(this.socket, stream.readableHighWaterMark);
-				this.res = response;
-
-				// Undocumented, but it is used by `cacheable-request`
-				response.url = `${this[kOrigin].origin}${this.path}`;
-
-				response.req = this;
-				response.statusCode = headers[HTTP2_HEADER_STATUS];
-				response.headers = headers;
-				response.rawHeaders = rawHeaders;
-
-				response.once('end', () => {
-					response.complete = true;
-
-					// Has no effect, just be consistent with the Node.js behavior
-					response.socket = null;
-					response.connection = null;
-				});
-
-				if (isConnectMethod) {
-					response.upgrade = true;
-
-					// The HTTP1 API says the socket is detached here,
-					// but we can't do that so we pass the original HTTP2 request.
-					if (this.emit('connect', response, stream, Buffer.alloc(0))) {
-						this.emit('close');
-					} else {
-						// No listeners attached, destroy the original request.
-						stream.destroy();
-					}
-				} else {
-					// Forwards data
-					stream.on('data', chunk => {
-						if (!response._dumped && !response.push(chunk)) {
-							stream.pause();
-						}
-					});
-
-					stream.once('end', () => {
-						if (!this.aborted) {
-							response.push(null);
-						}
-					});
-
-					if (!this.emit('response', response)) {
-						// No listeners attached, dump the response.
-						response._dump();
-					}
-				}
-			};
-
-			// This event tells we are ready to listen for the data.
-			stream.once('response', onResponse);
-
-			// Emits `information` event
-			stream.once('headers', headers => this.emit('information', {statusCode: headers[HTTP2_HEADER_STATUS]}));
-
-			stream.once('trailers', (trailers, flags, rawTrailers) => {
-				const {res} = this;
-
-				// https://github.com/nodejs/node/issues/41251
-				if (res === null) {
-					onResponse(trailers, flags, rawTrailers);
-					return;
-				}
-
-				// Assigns trailers to the response object.
-				res.trailers = trailers;
-				res.rawTrailers = rawTrailers;
-			});
-
-			stream.once('close', () => {
-				const {aborted, res} = this;
-				if (res) {
-					if (aborted) {
-						res.aborted = true;
-						res.emit('aborted');
-						res.destroy();
-					}
-
-					const finish = () => {
-						res.emit('close');
-
-						this.destroy();
-						this.emit('close');
-					};
-
-					if (res.readable) {
-						res.once('end', finish);
-					} else {
-						finish();
-					}
-
-					return;
-				}
-
-				if (!this.destroyed) {
-					this.destroy(new Error('The HTTP/2 stream has been early terminated'));
-					this.emit('close');
-					return;
-				}
-
-				this.destroy();
-				this.emit('close');
-			});
-
-			this.socket = new Proxy(stream, proxySocketHandler);
-
-			for (const job of this[kJobs]) {
-				job();
-			}
-
-			this.emit('socket', this.socket);
-		};
-
-		if (!(HTTP2_HEADER_AUTHORITY in this[kHeaders]) && !isConnectMethod) {
-			this[kHeaders][HTTP2_HEADER_AUTHORITY] = this[kOrigin].host;
-		}
-
-		// Makes a HTTP2 request
-		if (this[kSession]) {
-			try {
-				onStream(this[kSession].request(this[kHeaders]));
-			} catch (error) {
-				this.destroy(error);
-			}
-		} else {
-			this.reusedSocket = true;
-
-			try {
-				const promise = this.agent.request(this[kOrigin], this[kOptions], this[kHeaders]);
-				this[kPendingAgentPromise] = promise;
-
-				onStream(await promise);
-
-				this[kPendingAgentPromise] = false;
-			} catch (error) {
-				this[kPendingAgentPromise] = false;
-
-				this.destroy(error);
-			}
-		}
-	}
-
-	get connection() {
-		return this.socket;
-	}
-
-	set connection(value) {
-		this.socket = value;
-	}
-
-	getHeaderNames() {
-		return Object.keys(this[kHeaders]);
-	}
-
-	hasHeader(name) {
-		if (typeof name !== 'string') {
-			throw new ERR_INVALID_ARG_TYPE('name', 'string', name);
-		}
-
-		return Boolean(this[kHeaders][name.toLowerCase()]);
-	}
-
-	getHeader(name) {
-		if (typeof name !== 'string') {
-			throw new ERR_INVALID_ARG_TYPE('name', 'string', name);
-		}
-
-		return this[kHeaders][name.toLowerCase()];
-	}
-
-	get headersSent() {
-		return this[kFlushedHeaders];
-	}
-
-	removeHeader(name) {
-		if (typeof name !== 'string') {
-			throw new ERR_INVALID_ARG_TYPE('name', 'string', name);
-		}
-
-		if (this.headersSent) {
-			throw new ERR_HTTP_HEADERS_SENT('remove');
-		}
-
-		delete this[kHeaders][name.toLowerCase()];
-	}
-
-	setHeader(name, value) {
-		if (this.headersSent) {
-			throw new ERR_HTTP_HEADERS_SENT('set');
-		}
-
-		validateHeaderName(name);
-		validateHeaderValue(name, value);
-
-		const lowercased = name.toLowerCase();
-
-		if (lowercased === 'connection') {
-			if (value.toLowerCase() === 'keep-alive') {
-				return;
-			}
-
-			throw new Error(`Invalid 'connection' header: ${value}`);
-		}
-
-		if (lowercased === 'host' && this.method === 'CONNECT') {
-			this[kHeaders][HTTP2_HEADER_AUTHORITY] = value;
-		} else {
-			this[kHeaders][lowercased] = value;
-		}
-	}
-
-	setNoDelay() {
-		// HTTP2 sockets cannot be malformed, do nothing.
-	}
-
-	setSocketKeepAlive() {
-		// HTTP2 sockets cannot be malformed, do nothing.
-	}
-
-	setTimeout(ms, callback) {
-		const applyTimeout = () => this._request.setTimeout(ms, callback);
-
-		if (this._request) {
-			applyTimeout();
-		} else {
-			this[kJobs].push(applyTimeout);
-		}
-
-		return this;
-	}
-
-	get maxHeadersCount() {
-		if (!this.destroyed && this._request) {
-			return this._request.session.localSettings.maxHeaderListSize;
-		}
-
-		return undefined;
-	}
-
-	set maxHeadersCount(_value) {
-		// Updating HTTP2 settings would affect all requests, do nothing.
-	}
+exports.compareIdentifiers = compareIdentifiers
+
+var numeric = /^[0-9]+$/
+function compareIdentifiers (a, b) {
+  var anum = numeric.test(a)
+  var bnum = numeric.test(b)
+
+  if (anum && bnum) {
+    a = +a
+    b = +b
+  }
+
+  return a === b ? 0
+    : (anum && !bnum) ? -1
+    : (bnum && !anum) ? 1
+    : a < b ? -1
+    : 1
 }
 
-module.exports = ClientRequest;
-
-
-/***/ }),
-
-/***/ 2575:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-
-const {Readable} = __nccwpck_require__(2781);
-
-class IncomingMessage extends Readable {
-	constructor(socket, highWaterMark) {
-		super({
-			emitClose: false,
-			autoDestroy: true,
-			highWaterMark
-		});
-
-		this.statusCode = null;
-		this.statusMessage = '';
-		this.httpVersion = '2.0';
-		this.httpVersionMajor = 2;
-		this.httpVersionMinor = 0;
-		this.headers = {};
-		this.trailers = {};
-		this.req = null;
-
-		this.aborted = false;
-		this.complete = false;
-		this.upgrade = null;
-
-		this.rawHeaders = [];
-		this.rawTrailers = [];
-
-		this.socket = socket;
-
-		this._dumped = false;
-	}
-
-	get connection() {
-		return this.socket;
-	}
-
-	set connection(value) {
-		this.socket = value;
-	}
-
-	_destroy(error, callback) {
-		if (!this.readableEnded) {
-			this.aborted = true;
-		}
-
-		// See https://github.com/nodejs/node/issues/35303
-		callback();
-
-		this.req._request.destroy(error);
-	}
-
-	setTimeout(ms, callback) {
-		this.req.setTimeout(ms, callback);
-		return this;
-	}
-
-	_dump() {
-		if (!this._dumped) {
-			this._dumped = true;
-
-			this.removeAllListeners('data');
-			this.resume();
-		}
-	}
-
-	_read() {
-		if (this.req) {
-			this.req._request.resume();
-		}
-	}
+exports.rcompareIdentifiers = rcompareIdentifiers
+function rcompareIdentifiers (a, b) {
+  return compareIdentifiers(b, a)
 }
 
-module.exports = IncomingMessage;
-
-
-/***/ }),
-
-/***/ 4645:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-
-const http2 = __nccwpck_require__(5158);
-const {
-	Agent,
-	globalAgent
-} = __nccwpck_require__(9898);
-const ClientRequest = __nccwpck_require__(9632);
-const IncomingMessage = __nccwpck_require__(2575);
-const auto = __nccwpck_require__(7167);
-const {
-	HttpOverHttp2,
-	HttpsOverHttp2
-} = __nccwpck_require__(8795);
-const Http2OverHttp2 = __nccwpck_require__(8553);
-const {
-	Http2OverHttp,
-	Http2OverHttps
-} = __nccwpck_require__(9794);
-const validateHeaderName = __nccwpck_require__(4592);
-const validateHeaderValue = __nccwpck_require__(3549);
-
-const request = (url, options, callback) => new ClientRequest(url, options, callback);
-
-const get = (url, options, callback) => {
-	// eslint-disable-next-line unicorn/prevent-abbreviations
-	const req = new ClientRequest(url, options, callback);
-	req.end();
-
-	return req;
-};
-
-module.exports = {
-	...http2,
-	ClientRequest,
-	IncomingMessage,
-	Agent,
-	globalAgent,
-	request,
-	get,
-	auto,
-	proxies: {
-		HttpOverHttp2,
-		HttpsOverHttp2,
-		Http2OverHttp2,
-		Http2OverHttp,
-		Http2OverHttps
-	},
-	validateHeaderName,
-	validateHeaderValue
-};
-
-
-/***/ }),
-
-/***/ 7885:
-/***/ ((module) => {
-
-
-
-module.exports = self => {
-	const {username, password} = self.proxyOptions.url;
-
-	if (username || password) {
-		const data = `${username}:${password}`;
-		const authorization = `Basic ${Buffer.from(data).toString('base64')}`;
-
-		return {
-			'proxy-authorization': authorization,
-			authorization
-		};
-	}
-
-	return {};
-};
-
-
-/***/ }),
-
-/***/ 8795:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-
-const tls = __nccwpck_require__(4404);
-const http = __nccwpck_require__(3685);
-const https = __nccwpck_require__(5687);
-const JSStreamSocket = __nccwpck_require__(1564);
-const {globalAgent} = __nccwpck_require__(9898);
-const UnexpectedStatusCodeError = __nccwpck_require__(6203);
-const initialize = __nccwpck_require__(1089);
-const getAuthorizationHeaders = __nccwpck_require__(7885);
-
-const createConnection = (self, options, callback) => {
-	(async () => {
-		try {
-			const {proxyOptions} = self;
-			const {url, headers, raw} = proxyOptions;
-
-			const stream = await globalAgent.request(url, proxyOptions, {
-				...getAuthorizationHeaders(self),
-				...headers,
-				':method': 'CONNECT',
-				':authority': `${options.host}:${options.port}`
-			});
-
-			stream.once('error', callback);
-			stream.once('response', headers => {
-				const statusCode = headers[':status'];
-
-				if (statusCode !== 200) {
-					callback(new UnexpectedStatusCodeError(statusCode));
-					return;
-				}
-
-				const encrypted = self instanceof https.Agent;
-
-				if (raw && encrypted) {
-					options.socket = stream;
-					const secureStream = tls.connect(options);
-
-					secureStream.once('close', () => {
-						stream.destroy();
-					});
-
-					callback(null, secureStream);
-					return;
-				}
-
-				const socket = new JSStreamSocket(stream);
-				socket.encrypted = false;
-				socket._handle.getpeername = out => {
-					out.family = undefined;
-					out.address = undefined;
-					out.port = undefined;
-				};
-
-				callback(null, socket);
-			});
-		} catch (error) {
-			callback(error);
-		}
-	})();
-};
-
-class HttpOverHttp2 extends http.Agent {
-	constructor(options) {
-		super(options);
-
-		initialize(this, options.proxyOptions);
-	}
-
-	createConnection(options, callback) {
-		createConnection(this, options, callback);
-	}
+exports.major = major
+function major (a, loose) {
+  return new SemVer(a, loose).major
 }
 
-class HttpsOverHttp2 extends https.Agent {
-	constructor(options) {
-		super(options);
-
-		initialize(this, options.proxyOptions);
-	}
-
-	createConnection(options, callback) {
-		createConnection(this, options, callback);
-	}
+exports.minor = minor
+function minor (a, loose) {
+  return new SemVer(a, loose).minor
 }
 
-module.exports = {
-	HttpOverHttp2,
-	HttpsOverHttp2
-};
-
-
-/***/ }),
-
-/***/ 9794:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-
-const http = __nccwpck_require__(3685);
-const https = __nccwpck_require__(5687);
-const Http2OverHttpX = __nccwpck_require__(1857);
-const getAuthorizationHeaders = __nccwpck_require__(7885);
-
-const getStream = request => new Promise((resolve, reject) => {
-	const onConnect = (response, socket, head) => {
-		socket.unshift(head);
-
-		request.off('error', reject);
-		resolve([socket, response.statusCode]);
-	};
-
-	request.once('error', reject);
-	request.once('connect', onConnect);
-});
-
-class Http2OverHttp extends Http2OverHttpX {
-	async _getProxyStream(authority) {
-		const {proxyOptions} = this;
-		const {url, headers} = this.proxyOptions;
-
-		const network = url.protocol === 'https:' ? https : http;
-
-		// `new URL('https://localhost/httpbin.org:443')` results in
-		// a `/httpbin.org:443` path, which has an invalid leading slash.
-		const request = network.request({
-			...proxyOptions,
-			hostname: url.hostname,
-			port: url.port,
-			path: authority,
-			headers: {
-				...getAuthorizationHeaders(this),
-				...headers,
-				host: authority
-			},
-			method: 'CONNECT'
-		}).end();
-
-		return getStream(request);
-	}
+exports.patch = patch
+function patch (a, loose) {
+  return new SemVer(a, loose).patch
 }
 
-module.exports = {
-	Http2OverHttp,
-	Http2OverHttps: Http2OverHttp
-};
-
-
-/***/ }),
-
-/***/ 8553:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-
-const {globalAgent} = __nccwpck_require__(9898);
-const Http2OverHttpX = __nccwpck_require__(1857);
-const getAuthorizationHeaders = __nccwpck_require__(7885);
-
-const getStatusCode = stream => new Promise((resolve, reject) => {
-	stream.once('error', reject);
-	stream.once('response', headers => {
-		stream.off('error', reject);
-		resolve(headers[':status']);
-	});
-});
-
-class Http2OverHttp2 extends Http2OverHttpX {
-	async _getProxyStream(authority) {
-		const {proxyOptions} = this;
-
-		const headers = {
-			...getAuthorizationHeaders(this),
-			...proxyOptions.headers,
-			':method': 'CONNECT',
-			':authority': authority
-		};
-
-		const stream = await globalAgent.request(proxyOptions.url, proxyOptions, headers);
-		const statusCode = await getStatusCode(stream);
-
-		return [stream, statusCode];
-	}
+exports.compare = compare
+function compare (a, b, loose) {
+  return new SemVer(a, loose).compare(new SemVer(b, loose))
 }
 
-module.exports = Http2OverHttp2;
-
-
-/***/ }),
-
-/***/ 1857:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-
-const {Agent} = __nccwpck_require__(9898);
-const JSStreamSocket = __nccwpck_require__(1564);
-const UnexpectedStatusCodeError = __nccwpck_require__(6203);
-const initialize = __nccwpck_require__(1089);
-
-class Http2OverHttpX extends Agent {
-	constructor(options) {
-		super(options);
-
-		initialize(this, options.proxyOptions);
-	}
-
-	async createConnection(origin, options) {
-		const authority = `${origin.hostname}:${origin.port || 443}`;
-
-		const [stream, statusCode] = await this._getProxyStream(authority);
-		if (statusCode !== 200) {
-			throw new UnexpectedStatusCodeError(statusCode);
-		}
-
-		if (this.proxyOptions.raw) {
-			options.socket = stream;
-		} else {
-			const socket = new JSStreamSocket(stream);
-			socket.encrypted = false;
-			socket._handle.getpeername = out => {
-				out.family = undefined;
-				out.address = undefined;
-				out.port = undefined;
-			};
-
-			return socket;
-		}
-
-		return super.createConnection(origin, options);
-	}
+exports.compareLoose = compareLoose
+function compareLoose (a, b) {
+  return compare(a, b, true)
 }
 
-module.exports = Http2OverHttpX;
-
-
-/***/ }),
-
-/***/ 1089:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-
-// See https://github.com/facebook/jest/issues/2549
-// eslint-disable-next-line node/prefer-global/url
-const {URL} = __nccwpck_require__(7310);
-const checkType = __nccwpck_require__(3453);
-
-module.exports = (self, proxyOptions) => {
-	checkType('proxyOptions', proxyOptions, ['object']);
-	checkType('proxyOptions.headers', proxyOptions.headers, ['object', 'undefined']);
-	checkType('proxyOptions.raw', proxyOptions.raw, ['boolean', 'undefined']);
-	checkType('proxyOptions.url', proxyOptions.url, [URL, 'string']);
-
-	const url = new URL(proxyOptions.url);
-
-	self.proxyOptions = {
-		raw: true,
-		...proxyOptions,
-		headers: {...proxyOptions.headers},
-		url
-	};
-};
-
-
-/***/ }),
-
-/***/ 6203:
-/***/ ((module) => {
-
-
-
-class UnexpectedStatusCodeError extends Error {
-	constructor(statusCode) {
-		super(`The proxy server rejected the request with status code ${statusCode}`);
-		this.statusCode = statusCode;
-	}
+exports.rcompare = rcompare
+function rcompare (a, b, loose) {
+  return compare(b, a, loose)
 }
 
-module.exports = UnexpectedStatusCodeError;
-
-
-/***/ }),
-
-/***/ 1982:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-
-const {isIP} = __nccwpck_require__(1808);
-const assert = __nccwpck_require__(9491);
-
-const getHost = host => {
-	if (host[0] === '[') {
-		const idx = host.indexOf(']');
-
-		assert(idx !== -1);
-		return host.slice(1, idx);
-	}
-
-	const idx = host.indexOf(':');
-	if (idx === -1) {
-		return host;
-	}
-
-	return host.slice(0, idx);
-};
-
-module.exports = host => {
-	const servername = getHost(host);
-
-	if (isIP(servername)) {
-		return '';
-	}
-
-	return servername;
-};
-
-
-/***/ }),
-
-/***/ 3453:
-/***/ ((module) => {
-
-
-
-const checkType = (name, value, types) => {
-	const valid = types.some(type => {
-		const typeofType = typeof type;
-		if (typeofType === 'string') {
-			return typeof value === type;
-		}
-
-		return value instanceof type;
-	});
-
-	if (!valid) {
-		const names = types.map(type => typeof type === 'string' ? type : type.name);
-
-		throw new TypeError(`Expected '${name}' to be a type of ${names.join(' or ')}, got ${typeof value}`);
-	}
-};
-
-module.exports = checkType;
-
-
-/***/ }),
-
-/***/ 9237:
-/***/ ((module) => {
-
-
-
-module.exports = stream => {
-	if (stream.listenerCount('error') !== 0) {
-		return stream;
-	}
-
-	stream.__destroy = stream._destroy;
-	stream._destroy = (...args) => {
-		const callback = args.pop();
-
-		stream.__destroy(...args, async error => {
-			await Promise.resolve();
-			callback(error);
-		});
-	};
-
-	const onError = error => {
-		// eslint-disable-next-line promise/prefer-await-to-then
-		Promise.resolve().then(() => {
-			stream.emit('error', error);
-		});
-	};
-
-	stream.once('error', onError);
-
-	// eslint-disable-next-line promise/prefer-await-to-then
-	Promise.resolve().then(() => {
-		stream.off('error', onError);
-	});
-
-	return stream;
-};
-
-
-/***/ }),
-
-/***/ 7087:
-/***/ ((module) => {
-
-
-/* istanbul ignore file: https://github.com/nodejs/node/blob/master/lib/internal/errors.js */
-
-const makeError = (Base, key, getMessage) => {
-	module.exports[key] = class NodeError extends Base {
-		constructor(...args) {
-			super(typeof getMessage === 'string' ? getMessage : getMessage(args));
-			this.name = `${super.name} [${key}]`;
-			this.code = key;
-		}
-	};
-};
-
-makeError(TypeError, 'ERR_INVALID_ARG_TYPE', args => {
-	const type = args[0].includes('.') ? 'property' : 'argument';
-
-	let valid = args[1];
-	const isManyTypes = Array.isArray(valid);
-
-	if (isManyTypes) {
-		valid = `${valid.slice(0, -1).join(', ')} or ${valid.slice(-1)}`;
-	}
-
-	return `The "${args[0]}" ${type} must be ${isManyTypes ? 'one of' : 'of'} type ${valid}. Received ${typeof args[2]}`;
-});
-
-makeError(TypeError, 'ERR_INVALID_PROTOCOL', args =>
-	`Protocol "${args[0]}" not supported. Expected "${args[1]}"`
-);
-
-makeError(Error, 'ERR_HTTP_HEADERS_SENT', args =>
-	`Cannot ${args[0]} headers after they are sent to the client`
-);
-
-makeError(TypeError, 'ERR_INVALID_HTTP_TOKEN', args =>
-	`${args[0]} must be a valid HTTP token [${args[1]}]`
-);
-
-makeError(TypeError, 'ERR_HTTP_INVALID_HEADER_VALUE', args =>
-	`Invalid value "${args[0]} for header "${args[1]}"`
-);
-
-makeError(TypeError, 'ERR_INVALID_CHAR', args =>
-	`Invalid character in ${args[0]} [${args[1]}]`
-);
-
-makeError(
-	Error,
-	'ERR_HTTP2_NO_SOCKET_MANIPULATION',
-	'HTTP/2 sockets should not be directly manipulated (e.g. read and written)'
-);
-
-
-/***/ }),
-
-/***/ 1199:
-/***/ ((module) => {
-
-
-
-module.exports = header => {
-	switch (header) {
-		case ':method':
-		case ':scheme':
-		case ':authority':
-		case ':path':
-			return true;
-		default:
-			return false;
-	}
-};
-
-
-/***/ }),
-
-/***/ 1564:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-
-const stream = __nccwpck_require__(2781);
-const tls = __nccwpck_require__(4404);
-
-// Really awesome hack.
-const JSStreamSocket = (new tls.TLSSocket(new stream.PassThrough()))._handle._parentWrap.constructor;
-
-module.exports = JSStreamSocket;
-
-
-/***/ }),
-
-/***/ 1818:
-/***/ ((module) => {
-
-
-
-module.exports = (from, to, events) => {
-	for (const event of events) {
-		from.on(event, (...args) => to.emit(event, ...args));
-	}
-};
-
-
-/***/ }),
-
-/***/ 9404:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-
-const {ERR_HTTP2_NO_SOCKET_MANIPULATION} = __nccwpck_require__(7087);
-
-/* istanbul ignore file */
-/* https://github.com/nodejs/node/blob/6eec858f34a40ffa489c1ec54bb24da72a28c781/lib/internal/http2/compat.js#L195-L272 */
-
-const proxySocketHandler = {
-	has(stream, property) {
-		// Replaced [kSocket] with .socket
-		const reference = stream.session === undefined ? stream : stream.session.socket;
-		return (property in stream) || (property in reference);
-	},
-
-	get(stream, property) {
-		switch (property) {
-			case 'on':
-			case 'once':
-			case 'end':
-			case 'emit':
-			case 'destroy':
-				return stream[property].bind(stream);
-			case 'writable':
-			case 'destroyed':
-				return stream[property];
-			case 'readable':
-				if (stream.destroyed) {
-					return false;
-				}
-
-				return stream.readable;
-			case 'setTimeout': {
-				const {session} = stream;
-				if (session !== undefined) {
-					return session.setTimeout.bind(session);
-				}
-
-				return stream.setTimeout.bind(stream);
-			}
-
-			case 'write':
-			case 'read':
-			case 'pause':
-			case 'resume':
-				throw new ERR_HTTP2_NO_SOCKET_MANIPULATION();
-			default: {
-				// Replaced [kSocket] with .socket
-				const reference = stream.session === undefined ? stream : stream.session.socket;
-				const value = reference[property];
-
-				return typeof value === 'function' ? value.bind(reference) : value;
-			}
-		}
-	},
-
-	getPrototypeOf(stream) {
-		if (stream.session !== undefined) {
-			// Replaced [kSocket] with .socket
-			return Reflect.getPrototypeOf(stream.session.socket);
-		}
-
-		return Reflect.getPrototypeOf(stream);
-	},
-
-	set(stream, property, value) {
-		switch (property) {
-			case 'writable':
-			case 'readable':
-			case 'destroyed':
-			case 'on':
-			case 'once':
-			case 'end':
-			case 'emit':
-			case 'destroy':
-				stream[property] = value;
-				return true;
-			case 'setTimeout': {
-				const {session} = stream;
-				if (session === undefined) {
-					stream.setTimeout = value;
-				} else {
-					session.setTimeout = value;
-				}
-
-				return true;
-			}
-
-			case 'write':
-			case 'read':
-			case 'pause':
-			case 'resume':
-				throw new ERR_HTTP2_NO_SOCKET_MANIPULATION();
-			default: {
-				// Replaced [kSocket] with .socket
-				const reference = stream.session === undefined ? stream : stream.session.socket;
-				reference[property] = value;
-				return true;
-			}
-		}
-	}
-};
-
-module.exports = proxySocketHandler;
-
-
-/***/ }),
-
-/***/ 4592:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-
-const {ERR_INVALID_HTTP_TOKEN} = __nccwpck_require__(7087);
-const isRequestPseudoHeader = __nccwpck_require__(1199);
-
-const isValidHttpToken = /^[\^`\-\w!#$%&*+.|~]+$/;
-
-module.exports = name => {
-	if (typeof name !== 'string' || (!isValidHttpToken.test(name) && !isRequestPseudoHeader(name))) {
-		throw new ERR_INVALID_HTTP_TOKEN('Header name', name);
-	}
-};
-
-
-/***/ }),
-
-/***/ 3549:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-
-const {
-	ERR_HTTP_INVALID_HEADER_VALUE,
-	ERR_INVALID_CHAR
-} = __nccwpck_require__(7087);
-
-const isInvalidHeaderValue = /[^\t\u0020-\u007E\u0080-\u00FF]/;
-
-module.exports = (name, value) => {
-	if (typeof value === 'undefined') {
-		throw new ERR_HTTP_INVALID_HEADER_VALUE(value, name);
-	}
-
-	if (isInvalidHeaderValue.test(value)) {
-		throw new ERR_INVALID_CHAR('header content', name);
-	}
-};
-
-
-/***/ }),
-
-/***/ 2820:
-/***/ ((__unused_webpack_module, exports) => {
-
-//TODO: handle reviver/dehydrate function like normal
-//and handle indentation, like normal.
-//if anyone needs this... please send pull request.
-
-exports.stringify = function stringify (o) {
-  if('undefined' == typeof o) return o
-
-  if(o && Buffer.isBuffer(o))
-    return JSON.stringify(':base64:' + o.toString('base64'))
-
-  if(o && o.toJSON)
-    o =  o.toJSON()
-
-  if(o && 'object' === typeof o) {
-    var s = ''
-    var array = Array.isArray(o)
-    s = array ? '[' : '{'
-    var first = true
-
-    for(var k in o) {
-      var ignore = 'function' == typeof o[k] || (!array && 'undefined' === typeof o[k])
-      if(Object.hasOwnProperty.call(o, k) && !ignore) {
-        if(!first)
-          s += ','
-        first = false
-        if (array) {
-          if(o[k] == undefined)
-            s += 'null'
-          else
-            s += stringify(o[k])
-        } else if (o[k] !== void(0)) {
-          s += stringify(k) + ':' + stringify(o[k])
+exports.sort = sort
+function sort (list, loose) {
+  return list.sort(function (a, b) {
+    return exports.compare(a, b, loose)
+  })
+}
+
+exports.rsort = rsort
+function rsort (list, loose) {
+  return list.sort(function (a, b) {
+    return exports.rcompare(a, b, loose)
+  })
+}
+
+exports.gt = gt
+function gt (a, b, loose) {
+  return compare(a, b, loose) > 0
+}
+
+exports.lt = lt
+function lt (a, b, loose) {
+  return compare(a, b, loose) < 0
+}
+
+exports.eq = eq
+function eq (a, b, loose) {
+  return compare(a, b, loose) === 0
+}
+
+exports.neq = neq
+function neq (a, b, loose) {
+  return compare(a, b, loose) !== 0
+}
+
+exports.gte = gte
+function gte (a, b, loose) {
+  return compare(a, b, loose) >= 0
+}
+
+exports.lte = lte
+function lte (a, b, loose) {
+  return compare(a, b, loose) <= 0
+}
+
+exports.cmp = cmp
+function cmp (a, op, b, loose) {
+  switch (op) {
+    case '===':
+      if (typeof a === 'object')
+        a = a.version
+      if (typeof b === 'object')
+        b = b.version
+      return a === b
+
+    case '!==':
+      if (typeof a === 'object')
+        a = a.version
+      if (typeof b === 'object')
+        b = b.version
+      return a !== b
+
+    case '':
+    case '=':
+    case '==':
+      return eq(a, b, loose)
+
+    case '!=':
+      return neq(a, b, loose)
+
+    case '>':
+      return gt(a, b, loose)
+
+    case '>=':
+      return gte(a, b, loose)
+
+    case '<':
+      return lt(a, b, loose)
+
+    case '<=':
+      return lte(a, b, loose)
+
+    default:
+      throw new TypeError('Invalid operator: ' + op)
+  }
+}
+
+exports.Comparator = Comparator
+function Comparator (comp, options) {
+  if (!options || typeof options !== 'object') {
+    options = {
+      loose: !!options,
+      includePrerelease: false
+    }
+  }
+
+  if (comp instanceof Comparator) {
+    if (comp.loose === !!options.loose) {
+      return comp
+    } else {
+      comp = comp.value
+    }
+  }
+
+  if (!(this instanceof Comparator)) {
+    return new Comparator(comp, options)
+  }
+
+  debug('comparator', comp, options)
+  this.options = options
+  this.loose = !!options.loose
+  this.parse(comp)
+
+  if (this.semver === ANY) {
+    this.value = ''
+  } else {
+    this.value = this.operator + this.semver.version
+  }
+
+  debug('comp', this)
+}
+
+var ANY = {}
+Comparator.prototype.parse = function (comp) {
+  var r = this.options.loose ? re[COMPARATORLOOSE] : re[COMPARATOR]
+  var m = comp.match(r)
+
+  if (!m) {
+    throw new TypeError('Invalid comparator: ' + comp)
+  }
+
+  this.operator = m[1]
+  if (this.operator === '=') {
+    this.operator = ''
+  }
+
+  // if it literally is just '>' or '' then allow anything.
+  if (!m[2]) {
+    this.semver = ANY
+  } else {
+    this.semver = new SemVer(m[2], this.options.loose)
+  }
+}
+
+Comparator.prototype.toString = function () {
+  return this.value
+}
+
+Comparator.prototype.test = function (version) {
+  debug('Comparator.test', version, this.options.loose)
+
+  if (this.semver === ANY) {
+    return true
+  }
+
+  if (typeof version === 'string') {
+    version = new SemVer(version, this.options)
+  }
+
+  return cmp(version, this.operator, this.semver, this.options)
+}
+
+Comparator.prototype.intersects = function (comp, options) {
+  if (!(comp instanceof Comparator)) {
+    throw new TypeError('a Comparator is required')
+  }
+
+  if (!options || typeof options !== 'object') {
+    options = {
+      loose: !!options,
+      includePrerelease: false
+    }
+  }
+
+  var rangeTmp
+
+  if (this.operator === '') {
+    rangeTmp = new Range(comp.value, options)
+    return satisfies(this.value, rangeTmp, options)
+  } else if (comp.operator === '') {
+    rangeTmp = new Range(this.value, options)
+    return satisfies(comp.semver, rangeTmp, options)
+  }
+
+  var sameDirectionIncreasing =
+    (this.operator === '>=' || this.operator === '>') &&
+    (comp.operator === '>=' || comp.operator === '>')
+  var sameDirectionDecreasing =
+    (this.operator === '<=' || this.operator === '<') &&
+    (comp.operator === '<=' || comp.operator === '<')
+  var sameSemVer = this.semver.version === comp.semver.version
+  var differentDirectionsInclusive =
+    (this.operator === '>=' || this.operator === '<=') &&
+    (comp.operator === '>=' || comp.operator === '<=')
+  var oppositeDirectionsLessThan =
+    cmp(this.semver, '<', comp.semver, options) &&
+    ((this.operator === '>=' || this.operator === '>') &&
+    (comp.operator === '<=' || comp.operator === '<'))
+  var oppositeDirectionsGreaterThan =
+    cmp(this.semver, '>', comp.semver, options) &&
+    ((this.operator === '<=' || this.operator === '<') &&
+    (comp.operator === '>=' || comp.operator === '>'))
+
+  return sameDirectionIncreasing || sameDirectionDecreasing ||
+    (sameSemVer && differentDirectionsInclusive) ||
+    oppositeDirectionsLessThan || oppositeDirectionsGreaterThan
+}
+
+exports.Range = Range
+function Range (range, options) {
+  if (!options || typeof options !== 'object') {
+    options = {
+      loose: !!options,
+      includePrerelease: false
+    }
+  }
+
+  if (range instanceof Range) {
+    if (range.loose === !!options.loose &&
+        range.includePrerelease === !!options.includePrerelease) {
+      return range
+    } else {
+      return new Range(range.raw, options)
+    }
+  }
+
+  if (range instanceof Comparator) {
+    return new Range(range.value, options)
+  }
+
+  if (!(this instanceof Range)) {
+    return new Range(range, options)
+  }
+
+  this.options = options
+  this.loose = !!options.loose
+  this.includePrerelease = !!options.includePrerelease
+
+  // First, split based on boolean or ||
+  this.raw = range
+  this.set = range.split(/\s*\|\|\s*/).map(function (range) {
+    return this.parseRange(range.trim())
+  }, this).filter(function (c) {
+    // throw out any that are not relevant for whatever reason
+    return c.length
+  })
+
+  if (!this.set.length) {
+    throw new TypeError('Invalid SemVer Range: ' + range)
+  }
+
+  this.format()
+}
+
+Range.prototype.format = function () {
+  this.range = this.set.map(function (comps) {
+    return comps.join(' ').trim()
+  }).join('||').trim()
+  return this.range
+}
+
+Range.prototype.toString = function () {
+  return this.range
+}
+
+Range.prototype.parseRange = function (range) {
+  var loose = this.options.loose
+  range = range.trim()
+  // `1.2.3 - 1.2.4` => `>=1.2.3 <=1.2.4`
+  var hr = loose ? re[HYPHENRANGELOOSE] : re[HYPHENRANGE]
+  range = range.replace(hr, hyphenReplace)
+  debug('hyphen replace', range)
+  // `> 1.2.3 < 1.2.5` => `>1.2.3 <1.2.5`
+  range = range.replace(re[COMPARATORTRIM], comparatorTrimReplace)
+  debug('comparator trim', range, re[COMPARATORTRIM])
+
+  // `~ 1.2.3` => `~1.2.3`
+  range = range.replace(re[TILDETRIM], tildeTrimReplace)
+
+  // `^ 1.2.3` => `^1.2.3`
+  range = range.replace(re[CARETTRIM], caretTrimReplace)
+
+  // normalize spaces
+  range = range.split(/\s+/).join(' ')
+
+  // At this point, the range is completely trimmed and
+  // ready to be split into comparators.
+
+  var compRe = loose ? re[COMPARATORLOOSE] : re[COMPARATOR]
+  var set = range.split(' ').map(function (comp) {
+    return parseComparator(comp, this.options)
+  }, this).join(' ').split(/\s+/)
+  if (this.options.loose) {
+    // in loose mode, throw out any that are not valid comparators
+    set = set.filter(function (comp) {
+      return !!comp.match(compRe)
+    })
+  }
+  set = set.map(function (comp) {
+    return new Comparator(comp, this.options)
+  }, this)
+
+  return set
+}
+
+Range.prototype.intersects = function (range, options) {
+  if (!(range instanceof Range)) {
+    throw new TypeError('a Range is required')
+  }
+
+  return this.set.some(function (thisComparators) {
+    return thisComparators.every(function (thisComparator) {
+      return range.set.some(function (rangeComparators) {
+        return rangeComparators.every(function (rangeComparator) {
+          return thisComparator.intersects(rangeComparator, options)
+        })
+      })
+    })
+  })
+}
+
+// Mostly just for testing and legacy API reasons
+exports.toComparators = toComparators
+function toComparators (range, options) {
+  return new Range(range, options).set.map(function (comp) {
+    return comp.map(function (c) {
+      return c.value
+    }).join(' ').trim().split(' ')
+  })
+}
+
+// comprised of xranges, tildes, stars, and gtlt's at this point.
+// already replaced the hyphen ranges
+// turn into a set of JUST comparators.
+function parseComparator (comp, options) {
+  debug('comp', comp, options)
+  comp = replaceCarets(comp, options)
+  debug('caret', comp)
+  comp = replaceTildes(comp, options)
+  debug('tildes', comp)
+  comp = replaceXRanges(comp, options)
+  debug('xrange', comp)
+  comp = replaceStars(comp, options)
+  debug('stars', comp)
+  return comp
+}
+
+function isX (id) {
+  return !id || id.toLowerCase() === 'x' || id === '*'
+}
+
+// ~, ~> --> * (any, kinda silly)
+// ~2, ~2.x, ~2.x.x, ~>2, ~>2.x ~>2.x.x --> >=2.0.0 <3.0.0
+// ~2.0, ~2.0.x, ~>2.0, ~>2.0.x --> >=2.0.0 <2.1.0
+// ~1.2, ~1.2.x, ~>1.2, ~>1.2.x --> >=1.2.0 <1.3.0
+// ~1.2.3, ~>1.2.3 --> >=1.2.3 <1.3.0
+// ~1.2.0, ~>1.2.0 --> >=1.2.0 <1.3.0
+function replaceTildes (comp, options) {
+  return comp.trim().split(/\s+/).map(function (comp) {
+    return replaceTilde(comp, options)
+  }).join(' ')
+}
+
+function replaceTilde (comp, options) {
+  var r = options.loose ? re[TILDELOOSE] : re[TILDE]
+  return comp.replace(r, function (_, M, m, p, pr) {
+    debug('tilde', comp, _, M, m, p, pr)
+    var ret
+
+    if (isX(M)) {
+      ret = ''
+    } else if (isX(m)) {
+      ret = '>=' + M + '.0.0 <' + (+M + 1) + '.0.0'
+    } else if (isX(p)) {
+      // ~1.2 == >=1.2.0 <1.3.0
+      ret = '>=' + M + '.' + m + '.0 <' + M + '.' + (+m + 1) + '.0'
+    } else if (pr) {
+      debug('replaceTilde pr', pr)
+      ret = '>=' + M + '.' + m + '.' + p + '-' + pr +
+            ' <' + M + '.' + (+m + 1) + '.0'
+    } else {
+      // ~1.2.3 == >=1.2.3 <1.3.0
+      ret = '>=' + M + '.' + m + '.' + p +
+            ' <' + M + '.' + (+m + 1) + '.0'
+    }
+
+    debug('tilde return', ret)
+    return ret
+  })
+}
+
+// ^ --> * (any, kinda silly)
+// ^2, ^2.x, ^2.x.x --> >=2.0.0 <3.0.0
+// ^2.0, ^2.0.x --> >=2.0.0 <3.0.0
+// ^1.2, ^1.2.x --> >=1.2.0 <2.0.0
+// ^1.2.3 --> >=1.2.3 <2.0.0
+// ^1.2.0 --> >=1.2.0 <2.0.0
+function replaceCarets (comp, options) {
+  return comp.trim().split(/\s+/).map(function (comp) {
+    return replaceCaret(comp, options)
+  }).join(' ')
+}
+
+function replaceCaret (comp, options) {
+  debug('caret', comp, options)
+  var r = options.loose ? re[CARETLOOSE] : re[CARET]
+  return comp.replace(r, function (_, M, m, p, pr) {
+    debug('caret', comp, _, M, m, p, pr)
+    var ret
+
+    if (isX(M)) {
+      ret = ''
+    } else if (isX(m)) {
+      ret = '>=' + M + '.0.0 <' + (+M + 1) + '.0.0'
+    } else if (isX(p)) {
+      if (M === '0') {
+        ret = '>=' + M + '.' + m + '.0 <' + M + '.' + (+m + 1) + '.0'
+      } else {
+        ret = '>=' + M + '.' + m + '.0 <' + (+M + 1) + '.0.0'
+      }
+    } else if (pr) {
+      debug('replaceCaret pr', pr)
+      if (M === '0') {
+        if (m === '0') {
+          ret = '>=' + M + '.' + m + '.' + p + '-' + pr +
+                ' <' + M + '.' + m + '.' + (+p + 1)
+        } else {
+          ret = '>=' + M + '.' + m + '.' + p + '-' + pr +
+                ' <' + M + '.' + (+m + 1) + '.0'
+        }
+      } else {
+        ret = '>=' + M + '.' + m + '.' + p + '-' + pr +
+              ' <' + (+M + 1) + '.0.0'
+      }
+    } else {
+      debug('no pr')
+      if (M === '0') {
+        if (m === '0') {
+          ret = '>=' + M + '.' + m + '.' + p +
+                ' <' + M + '.' + m + '.' + (+p + 1)
+        } else {
+          ret = '>=' + M + '.' + m + '.' + p +
+                ' <' + M + '.' + (+m + 1) + '.0'
+        }
+      } else {
+        ret = '>=' + M + '.' + m + '.' + p +
+              ' <' + (+M + 1) + '.0.0'
+      }
+    }
+
+    debug('caret return', ret)
+    return ret
+  })
+}
+
+function replaceXRanges (comp, options) {
+  debug('replaceXRanges', comp, options)
+  return comp.split(/\s+/).map(function (comp) {
+    return replaceXRange(comp, options)
+  }).join(' ')
+}
+
+function replaceXRange (comp, options) {
+  comp = comp.trim()
+  var r = options.loose ? re[XRANGELOOSE] : re[XRANGE]
+  return comp.replace(r, function (ret, gtlt, M, m, p, pr) {
+    debug('xRange', comp, ret, gtlt, M, m, p, pr)
+    var xM = isX(M)
+    var xm = xM || isX(m)
+    var xp = xm || isX(p)
+    var anyX = xp
+
+    if (gtlt === '=' && anyX) {
+      gtlt = ''
+    }
+
+    if (xM) {
+      if (gtlt === '>' || gtlt === '<') {
+        // nothing is allowed
+        ret = '<0.0.0'
+      } else {
+        // nothing is forbidden
+        ret = '*'
+      }
+    } else if (gtlt && anyX) {
+      // we know patch is an x, because we have any x at all.
+      // replace X with 0
+      if (xm) {
+        m = 0
+      }
+      p = 0
+
+      if (gtlt === '>') {
+        // >1 => >=2.0.0
+        // >1.2 => >=1.3.0
+        // >1.2.3 => >= 1.2.4
+        gtlt = '>='
+        if (xm) {
+          M = +M + 1
+          m = 0
+          p = 0
+        } else {
+          m = +m + 1
+          p = 0
+        }
+      } else if (gtlt === '<=') {
+        // <=0.7.x is actually <0.8.0, since any 0.7.x should
+        // pass.  Similarly, <=7.x is actually <8.0.0, etc.
+        gtlt = '<'
+        if (xm) {
+          M = +M + 1
+        } else {
+          m = +m + 1
+        }
+      }
+
+      ret = gtlt + M + '.' + m + '.' + p
+    } else if (xm) {
+      ret = '>=' + M + '.0.0 <' + (+M + 1) + '.0.0'
+    } else if (xp) {
+      ret = '>=' + M + '.' + m + '.0 <' + M + '.' + (+m + 1) + '.0'
+    }
+
+    debug('xRange return', ret)
+
+    return ret
+  })
+}
+
+// Because * is AND-ed with everything else in the comparator,
+// and '' means "any version", just remove the *s entirely.
+function replaceStars (comp, options) {
+  debug('replaceStars', comp, options)
+  // Looseness is ignored here.  star is always as loose as it gets!
+  return comp.trim().replace(re[STAR], '')
+}
+
+// This function is passed to string.replace(re[HYPHENRANGE])
+// M, m, patch, prerelease, build
+// 1.2 - 3.4.5 => >=1.2.0 <=3.4.5
+// 1.2.3 - 3.4 => >=1.2.0 <3.5.0 Any 3.4.x will do
+// 1.2 - 3.4 => >=1.2.0 <3.5.0
+function hyphenReplace ($0,
+  from, fM, fm, fp, fpr, fb,
+  to, tM, tm, tp, tpr, tb) {
+  if (isX(fM)) {
+    from = ''
+  } else if (isX(fm)) {
+    from = '>=' + fM + '.0.0'
+  } else if (isX(fp)) {
+    from = '>=' + fM + '.' + fm + '.0'
+  } else {
+    from = '>=' + from
+  }
+
+  if (isX(tM)) {
+    to = ''
+  } else if (isX(tm)) {
+    to = '<' + (+tM + 1) + '.0.0'
+  } else if (isX(tp)) {
+    to = '<' + tM + '.' + (+tm + 1) + '.0'
+  } else if (tpr) {
+    to = '<=' + tM + '.' + tm + '.' + tp + '-' + tpr
+  } else {
+    to = '<=' + to
+  }
+
+  return (from + ' ' + to).trim()
+}
+
+// if ANY of the sets match ALL of its comparators, then pass
+Range.prototype.test = function (version) {
+  if (!version) {
+    return false
+  }
+
+  if (typeof version === 'string') {
+    version = new SemVer(version, this.options)
+  }
+
+  for (var i = 0; i < this.set.length; i++) {
+    if (testSet(this.set[i], version, this.options)) {
+      return true
+    }
+  }
+  return false
+}
+
+function testSet (set, version, options) {
+  for (var i = 0; i < set.length; i++) {
+    if (!set[i].test(version)) {
+      return false
+    }
+  }
+
+  if (version.prerelease.length && !options.includePrerelease) {
+    // Find the set of versions that are allowed to have prereleases
+    // For example, ^1.2.3-pr.1 desugars to >=1.2.3-pr.1 <2.0.0
+    // That should allow `1.2.3-pr.2` to pass.
+    // However, `1.2.4-alpha.notready` should NOT be allowed,
+    // even though it's within the range set by the comparators.
+    for (i = 0; i < set.length; i++) {
+      debug(set[i].semver)
+      if (set[i].semver === ANY) {
+        continue
+      }
+
+      if (set[i].semver.prerelease.length > 0) {
+        var allowed = set[i].semver
+        if (allowed.major === version.major &&
+            allowed.minor === version.minor &&
+            allowed.patch === version.patch) {
+          return true
         }
       }
     }
 
-    s += array ? ']' : '}'
+    // Version has a -pre, but it's not one of the ones we like.
+    return false
+  }
 
-    return s
-  } else if ('string' === typeof o) {
-    return JSON.stringify(/^:/.test(o) ? ':' + o : o)
-  } else if ('undefined' === typeof o) {
-    return 'null';
-  } else
-    return JSON.stringify(o)
+  return true
 }
 
-exports.parse = function (s) {
-  return JSON.parse(s, function (key, value) {
-    if('string' === typeof value) {
-      if(/^:base64:/.test(value))
-        return Buffer.from(value.substring(8), 'base64')
-      else
-        return /^:/.test(value) ? value.substring(1) : value 
+exports.satisfies = satisfies
+function satisfies (version, range, options) {
+  try {
+    range = new Range(range, options)
+  } catch (er) {
+    return false
+  }
+  return range.test(version)
+}
+
+exports.maxSatisfying = maxSatisfying
+function maxSatisfying (versions, range, options) {
+  var max = null
+  var maxSV = null
+  try {
+    var rangeObj = new Range(range, options)
+  } catch (er) {
+    return null
+  }
+  versions.forEach(function (v) {
+    if (rangeObj.test(v)) {
+      // satisfies(v, range, options)
+      if (!max || maxSV.compare(v) === -1) {
+        // compare(max, v, true)
+        max = v
+        maxSV = new SemVer(max, options)
+      }
     }
-    return value
+  })
+  return max
+}
+
+exports.minSatisfying = minSatisfying
+function minSatisfying (versions, range, options) {
+  var min = null
+  var minSV = null
+  try {
+    var rangeObj = new Range(range, options)
+  } catch (er) {
+    return null
+  }
+  versions.forEach(function (v) {
+    if (rangeObj.test(v)) {
+      // satisfies(v, range, options)
+      if (!min || minSV.compare(v) === 1) {
+        // compare(min, v, true)
+        min = v
+        minSV = new SemVer(min, options)
+      }
+    }
+  })
+  return min
+}
+
+exports.minVersion = minVersion
+function minVersion (range, loose) {
+  range = new Range(range, loose)
+
+  var minver = new SemVer('0.0.0')
+  if (range.test(minver)) {
+    return minver
+  }
+
+  minver = new SemVer('0.0.0-0')
+  if (range.test(minver)) {
+    return minver
+  }
+
+  minver = null
+  for (var i = 0; i < range.set.length; ++i) {
+    var comparators = range.set[i]
+
+    comparators.forEach(function (comparator) {
+      // Clone to avoid manipulating the comparator's semver object.
+      var compver = new SemVer(comparator.semver.version)
+      switch (comparator.operator) {
+        case '>':
+          if (compver.prerelease.length === 0) {
+            compver.patch++
+          } else {
+            compver.prerelease.push(0)
+          }
+          compver.raw = compver.format()
+          /* fallthrough */
+        case '':
+        case '>=':
+          if (!minver || gt(minver, compver)) {
+            minver = compver
+          }
+          break
+        case '<':
+        case '<=':
+          /* Ignore maximum versions */
+          break
+        /* istanbul ignore next */
+        default:
+          throw new Error('Unexpected operation: ' + comparator.operator)
+      }
+    })
+  }
+
+  if (minver && range.test(minver)) {
+    return minver
+  }
+
+  return null
+}
+
+exports.validRange = validRange
+function validRange (range, options) {
+  try {
+    // Return '*' instead of '' so that truthiness works.
+    // This will throw if it's invalid anyway
+    return new Range(range, options).range || '*'
+  } catch (er) {
+    return null
+  }
+}
+
+// Determine if version is less than all the versions possible in the range
+exports.ltr = ltr
+function ltr (version, range, options) {
+  return outside(version, range, '<', options)
+}
+
+// Determine if version is greater than all the versions possible in the range.
+exports.gtr = gtr
+function gtr (version, range, options) {
+  return outside(version, range, '>', options)
+}
+
+exports.outside = outside
+function outside (version, range, hilo, options) {
+  version = new SemVer(version, options)
+  range = new Range(range, options)
+
+  var gtfn, ltefn, ltfn, comp, ecomp
+  switch (hilo) {
+    case '>':
+      gtfn = gt
+      ltefn = lte
+      ltfn = lt
+      comp = '>'
+      ecomp = '>='
+      break
+    case '<':
+      gtfn = lt
+      ltefn = gte
+      ltfn = gt
+      comp = '<'
+      ecomp = '<='
+      break
+    default:
+      throw new TypeError('Must provide a hilo val of "<" or ">"')
+  }
+
+  // If it satisifes the range it is not outside
+  if (satisfies(version, range, options)) {
+    return false
+  }
+
+  // From now on, variable terms are as if we're in "gtr" mode.
+  // but note that everything is flipped for the "ltr" function.
+
+  for (var i = 0; i < range.set.length; ++i) {
+    var comparators = range.set[i]
+
+    var high = null
+    var low = null
+
+    comparators.forEach(function (comparator) {
+      if (comparator.semver === ANY) {
+        comparator = new Comparator('>=0.0.0')
+      }
+      high = high || comparator
+      low = low || comparator
+      if (gtfn(comparator.semver, high.semver, options)) {
+        high = comparator
+      } else if (ltfn(comparator.semver, low.semver, options)) {
+        low = comparator
+      }
+    })
+
+    // If the edge version comparator has a operator then our version
+    // isn't outside it
+    if (high.operator === comp || high.operator === ecomp) {
+      return false
+    }
+
+    // If the lowest version comparator has an operator and our version
+    // is less than it then it isn't higher than the range
+    if ((!low.operator || low.operator === comp) &&
+        ltefn(version, low.semver)) {
+      return false
+    } else if (low.operator === ecomp && ltfn(version, low.semver)) {
+      return false
+    }
+  }
+  return true
+}
+
+exports.prerelease = prerelease
+function prerelease (version, options) {
+  var parsed = parse(version, options)
+  return (parsed && parsed.prerelease.length) ? parsed.prerelease : null
+}
+
+exports.intersects = intersects
+function intersects (r1, r2, options) {
+  r1 = new Range(r1, options)
+  r2 = new Range(r2, options)
+  return r1.intersects(r2)
+}
+
+exports.coerce = coerce
+function coerce (version) {
+  if (version instanceof SemVer) {
+    return version
+  }
+
+  if (typeof version !== 'string') {
+    return null
+  }
+
+  var match = version.match(re[COERCE])
+
+  if (match == null) {
+    return null
+  }
+
+  return parse(match[1] +
+    '.' + (match[2] || '0') +
+    '.' + (match[3] || '0'))
+}
+
+
+/***/ }),
+
+/***/ 2022:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+var timespan = __nccwpck_require__(6098);
+var PS_SUPPORTED = __nccwpck_require__(9085);
+var jws = __nccwpck_require__(4636);
+var includes = __nccwpck_require__(7931);
+var isBoolean = __nccwpck_require__(6501);
+var isInteger = __nccwpck_require__(1441);
+var isNumber = __nccwpck_require__(298);
+var isPlainObject = __nccwpck_require__(5723);
+var isString = __nccwpck_require__(5180);
+var once = __nccwpck_require__(4499);
+
+var SUPPORTED_ALGS = ['RS256', 'RS384', 'RS512', 'ES256', 'ES384', 'ES512', 'HS256', 'HS384', 'HS512', 'none']
+if (PS_SUPPORTED) {
+  SUPPORTED_ALGS.splice(3, 0, 'PS256', 'PS384', 'PS512');
+}
+
+var sign_options_schema = {
+  expiresIn: { isValid: function(value) { return isInteger(value) || (isString(value) && value); }, message: '"expiresIn" should be a number of seconds or string representing a timespan' },
+  notBefore: { isValid: function(value) { return isInteger(value) || (isString(value) && value); }, message: '"notBefore" should be a number of seconds or string representing a timespan' },
+  audience: { isValid: function(value) { return isString(value) || Array.isArray(value); }, message: '"audience" must be a string or array' },
+  algorithm: { isValid: includes.bind(null, SUPPORTED_ALGS), message: '"algorithm" must be a valid string enum value' },
+  header: { isValid: isPlainObject, message: '"header" must be an object' },
+  encoding: { isValid: isString, message: '"encoding" must be a string' },
+  issuer: { isValid: isString, message: '"issuer" must be a string' },
+  subject: { isValid: isString, message: '"subject" must be a string' },
+  jwtid: { isValid: isString, message: '"jwtid" must be a string' },
+  noTimestamp: { isValid: isBoolean, message: '"noTimestamp" must be a boolean' },
+  keyid: { isValid: isString, message: '"keyid" must be a string' },
+  mutatePayload: { isValid: isBoolean, message: '"mutatePayload" must be a boolean' }
+};
+
+var registered_claims_schema = {
+  iat: { isValid: isNumber, message: '"iat" should be a number of seconds' },
+  exp: { isValid: isNumber, message: '"exp" should be a number of seconds' },
+  nbf: { isValid: isNumber, message: '"nbf" should be a number of seconds' }
+};
+
+function validate(schema, allowUnknown, object, parameterName) {
+  if (!isPlainObject(object)) {
+    throw new Error('Expected "' + parameterName + '" to be a plain object.');
+  }
+  Object.keys(object)
+    .forEach(function(key) {
+      var validator = schema[key];
+      if (!validator) {
+        if (!allowUnknown) {
+          throw new Error('"' + key + '" is not allowed in "' + parameterName + '"');
+        }
+        return;
+      }
+      if (!validator.isValid(object[key])) {
+        throw new Error(validator.message);
+      }
+    });
+}
+
+function validateOptions(options) {
+  return validate(sign_options_schema, false, options, 'options');
+}
+
+function validatePayload(payload) {
+  return validate(registered_claims_schema, true, payload, 'payload');
+}
+
+var options_to_payload = {
+  'audience': 'aud',
+  'issuer': 'iss',
+  'subject': 'sub',
+  'jwtid': 'jti'
+};
+
+var options_for_objects = [
+  'expiresIn',
+  'notBefore',
+  'noTimestamp',
+  'audience',
+  'issuer',
+  'subject',
+  'jwtid',
+];
+
+module.exports = function (payload, secretOrPrivateKey, options, callback) {
+  if (typeof options === 'function') {
+    callback = options;
+    options = {};
+  } else {
+    options = options || {};
+  }
+
+  var isObjectPayload = typeof payload === 'object' &&
+                        !Buffer.isBuffer(payload);
+
+  var header = Object.assign({
+    alg: options.algorithm || 'HS256',
+    typ: isObjectPayload ? 'JWT' : undefined,
+    kid: options.keyid
+  }, options.header);
+
+  function failure(err) {
+    if (callback) {
+      return callback(err);
+    }
+    throw err;
+  }
+
+  if (!secretOrPrivateKey && options.algorithm !== 'none') {
+    return failure(new Error('secretOrPrivateKey must have a value'));
+  }
+
+  if (typeof payload === 'undefined') {
+    return failure(new Error('payload is required'));
+  } else if (isObjectPayload) {
+    try {
+      validatePayload(payload);
+    }
+    catch (error) {
+      return failure(error);
+    }
+    if (!options.mutatePayload) {
+      payload = Object.assign({},payload);
+    }
+  } else {
+    var invalid_options = options_for_objects.filter(function (opt) {
+      return typeof options[opt] !== 'undefined';
+    });
+
+    if (invalid_options.length > 0) {
+      return failure(new Error('invalid ' + invalid_options.join(',') + ' option for ' + (typeof payload ) + ' payload'));
+    }
+  }
+
+  if (typeof payload.exp !== 'undefined' && typeof options.expiresIn !== 'undefined') {
+    return failure(new Error('Bad "options.expiresIn" option the payload already has an "exp" property.'));
+  }
+
+  if (typeof payload.nbf !== 'undefined' && typeof options.notBefore !== 'undefined') {
+    return failure(new Error('Bad "options.notBefore" option the payload already has an "nbf" property.'));
+  }
+
+  try {
+    validateOptions(options);
+  }
+  catch (error) {
+    return failure(error);
+  }
+
+  var timestamp = payload.iat || Math.floor(Date.now() / 1000);
+
+  if (options.noTimestamp) {
+    delete payload.iat;
+  } else if (isObjectPayload) {
+    payload.iat = timestamp;
+  }
+
+  if (typeof options.notBefore !== 'undefined') {
+    try {
+      payload.nbf = timespan(options.notBefore, timestamp);
+    }
+    catch (err) {
+      return failure(err);
+    }
+    if (typeof payload.nbf === 'undefined') {
+      return failure(new Error('"notBefore" should be a number of seconds or string representing a timespan eg: "1d", "20h", 60'));
+    }
+  }
+
+  if (typeof options.expiresIn !== 'undefined' && typeof payload === 'object') {
+    try {
+      payload.exp = timespan(options.expiresIn, timestamp);
+    }
+    catch (err) {
+      return failure(err);
+    }
+    if (typeof payload.exp === 'undefined') {
+      return failure(new Error('"expiresIn" should be a number of seconds or string representing a timespan eg: "1d", "20h", 60'));
+    }
+  }
+
+  Object.keys(options_to_payload).forEach(function (key) {
+    var claim = options_to_payload[key];
+    if (typeof options[key] !== 'undefined') {
+      if (typeof payload[claim] !== 'undefined') {
+        return failure(new Error('Bad "options.' + key + '" option. The payload already has an "' + claim + '" property.'));
+      }
+      payload[claim] = options[key];
+    }
+  });
+
+  var encoding = options.encoding || 'utf8';
+
+  if (typeof callback === 'function') {
+    callback = callback && once(callback);
+
+    jws.createSign({
+      header: header,
+      privateKey: secretOrPrivateKey,
+      payload: payload,
+      encoding: encoding
+    }).once('error', callback)
+      .once('done', function (signature) {
+        callback(null, signature);
+      });
+  } else {
+    return jws.sign({header: header, payload: payload, secret: secretOrPrivateKey, encoding: encoding});
+  }
+};
+
+
+/***/ }),
+
+/***/ 2327:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+var JsonWebTokenError = __nccwpck_require__(405);
+var NotBeforeError    = __nccwpck_require__(4383);
+var TokenExpiredError = __nccwpck_require__(6637);
+var decode            = __nccwpck_require__(3359);
+var timespan          = __nccwpck_require__(6098);
+var PS_SUPPORTED      = __nccwpck_require__(9085);
+var jws               = __nccwpck_require__(4636);
+
+var PUB_KEY_ALGS = ['RS256', 'RS384', 'RS512', 'ES256', 'ES384', 'ES512'];
+var RSA_KEY_ALGS = ['RS256', 'RS384', 'RS512'];
+var HS_ALGS = ['HS256', 'HS384', 'HS512'];
+
+if (PS_SUPPORTED) {
+  PUB_KEY_ALGS.splice(3, 0, 'PS256', 'PS384', 'PS512');
+  RSA_KEY_ALGS.splice(3, 0, 'PS256', 'PS384', 'PS512');
+}
+
+module.exports = function (jwtString, secretOrPublicKey, options, callback) {
+  if ((typeof options === 'function') && !callback) {
+    callback = options;
+    options = {};
+  }
+
+  if (!options) {
+    options = {};
+  }
+
+  //clone this object since we are going to mutate it.
+  options = Object.assign({}, options);
+
+  var done;
+
+  if (callback) {
+    done = callback;
+  } else {
+    done = function(err, data) {
+      if (err) throw err;
+      return data;
+    };
+  }
+
+  if (options.clockTimestamp && typeof options.clockTimestamp !== 'number') {
+    return done(new JsonWebTokenError('clockTimestamp must be a number'));
+  }
+
+  if (options.nonce !== undefined && (typeof options.nonce !== 'string' || options.nonce.trim() === '')) {
+    return done(new JsonWebTokenError('nonce must be a non-empty string'));
+  }
+
+  var clockTimestamp = options.clockTimestamp || Math.floor(Date.now() / 1000);
+
+  if (!jwtString){
+    return done(new JsonWebTokenError('jwt must be provided'));
+  }
+
+  if (typeof jwtString !== 'string') {
+    return done(new JsonWebTokenError('jwt must be a string'));
+  }
+
+  var parts = jwtString.split('.');
+
+  if (parts.length !== 3){
+    return done(new JsonWebTokenError('jwt malformed'));
+  }
+
+  var decodedToken;
+
+  try {
+    decodedToken = decode(jwtString, { complete: true });
+  } catch(err) {
+    return done(err);
+  }
+
+  if (!decodedToken) {
+    return done(new JsonWebTokenError('invalid token'));
+  }
+
+  var header = decodedToken.header;
+  var getSecret;
+
+  if(typeof secretOrPublicKey === 'function') {
+    if(!callback) {
+      return done(new JsonWebTokenError('verify must be called asynchronous if secret or public key is provided as a callback'));
+    }
+
+    getSecret = secretOrPublicKey;
+  }
+  else {
+    getSecret = function(header, secretCallback) {
+      return secretCallback(null, secretOrPublicKey);
+    };
+  }
+
+  return getSecret(header, function(err, secretOrPublicKey) {
+    if(err) {
+      return done(new JsonWebTokenError('error in secret or public key callback: ' + err.message));
+    }
+
+    var hasSignature = parts[2].trim() !== '';
+
+    if (!hasSignature && secretOrPublicKey){
+      return done(new JsonWebTokenError('jwt signature is required'));
+    }
+
+    if (hasSignature && !secretOrPublicKey) {
+      return done(new JsonWebTokenError('secret or public key must be provided'));
+    }
+
+    if (!hasSignature && !options.algorithms) {
+      options.algorithms = ['none'];
+    }
+
+    if (!options.algorithms) {
+      options.algorithms = ~secretOrPublicKey.toString().indexOf('BEGIN CERTIFICATE') ||
+        ~secretOrPublicKey.toString().indexOf('BEGIN PUBLIC KEY') ? PUB_KEY_ALGS :
+        ~secretOrPublicKey.toString().indexOf('BEGIN RSA PUBLIC KEY') ? RSA_KEY_ALGS : HS_ALGS;
+
+    }
+
+    if (!~options.algorithms.indexOf(decodedToken.header.alg)) {
+      return done(new JsonWebTokenError('invalid algorithm'));
+    }
+
+    var valid;
+
+    try {
+      valid = jws.verify(jwtString, decodedToken.header.alg, secretOrPublicKey);
+    } catch (e) {
+      return done(e);
+    }
+
+    if (!valid) {
+      return done(new JsonWebTokenError('invalid signature'));
+    }
+
+    var payload = decodedToken.payload;
+
+    if (typeof payload.nbf !== 'undefined' && !options.ignoreNotBefore) {
+      if (typeof payload.nbf !== 'number') {
+        return done(new JsonWebTokenError('invalid nbf value'));
+      }
+      if (payload.nbf > clockTimestamp + (options.clockTolerance || 0)) {
+        return done(new NotBeforeError('jwt not active', new Date(payload.nbf * 1000)));
+      }
+    }
+
+    if (typeof payload.exp !== 'undefined' && !options.ignoreExpiration) {
+      if (typeof payload.exp !== 'number') {
+        return done(new JsonWebTokenError('invalid exp value'));
+      }
+      if (clockTimestamp >= payload.exp + (options.clockTolerance || 0)) {
+        return done(new TokenExpiredError('jwt expired', new Date(payload.exp * 1000)));
+      }
+    }
+
+    if (options.audience) {
+      var audiences = Array.isArray(options.audience) ? options.audience : [options.audience];
+      var target = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
+
+      var match = target.some(function (targetAudience) {
+        return audiences.some(function (audience) {
+          return audience instanceof RegExp ? audience.test(targetAudience) : audience === targetAudience;
+        });
+      });
+
+      if (!match) {
+        return done(new JsonWebTokenError('jwt audience invalid. expected: ' + audiences.join(' or ')));
+      }
+    }
+
+    if (options.issuer) {
+      var invalid_issuer =
+              (typeof options.issuer === 'string' && payload.iss !== options.issuer) ||
+              (Array.isArray(options.issuer) && options.issuer.indexOf(payload.iss) === -1);
+
+      if (invalid_issuer) {
+        return done(new JsonWebTokenError('jwt issuer invalid. expected: ' + options.issuer));
+      }
+    }
+
+    if (options.subject) {
+      if (payload.sub !== options.subject) {
+        return done(new JsonWebTokenError('jwt subject invalid. expected: ' + options.subject));
+      }
+    }
+
+    if (options.jwtid) {
+      if (payload.jti !== options.jwtid) {
+        return done(new JsonWebTokenError('jwt jwtid invalid. expected: ' + options.jwtid));
+      }
+    }
+
+    if (options.nonce) {
+      if (payload.nonce !== options.nonce) {
+        return done(new JsonWebTokenError('jwt nonce invalid. expected: ' + options.nonce));
+      }
+    }
+
+    if (options.maxAge) {
+      if (typeof payload.iat !== 'number') {
+        return done(new JsonWebTokenError('iat required when maxAge is specified'));
+      }
+
+      var maxAgeTimestamp = timespan(options.maxAge, payload.iat);
+      if (typeof maxAgeTimestamp === 'undefined') {
+        return done(new JsonWebTokenError('"maxAge" should be a number of seconds or string representing a timespan eg: "1d", "20h", 60'));
+      }
+      if (clockTimestamp >= maxAgeTimestamp + (options.clockTolerance || 0)) {
+        return done(new TokenExpiredError('maxAge exceeded', new Date(maxAgeTimestamp * 1000)));
+      }
+    }
+
+    if (options.complete === true) {
+      var signature = decodedToken.signature;
+
+      return done(null, {
+        header: header,
+        payload: payload,
+        signature: signature
+      });
+    }
+
+    return done(null, payload);
+  });
+};
+
+
+/***/ }),
+
+/***/ 6010:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+var bufferEqual = __nccwpck_require__(9239);
+var Buffer = (__nccwpck_require__(1867).Buffer);
+var crypto = __nccwpck_require__(6113);
+var formatEcdsa = __nccwpck_require__(1728);
+var util = __nccwpck_require__(3837);
+
+var MSG_INVALID_ALGORITHM = '"%s" is not a valid algorithm.\n  Supported algorithms are:\n  "HS256", "HS384", "HS512", "RS256", "RS384", "RS512", "PS256", "PS384", "PS512", "ES256", "ES384", "ES512" and "none".'
+var MSG_INVALID_SECRET = 'secret must be a string or buffer';
+var MSG_INVALID_VERIFIER_KEY = 'key must be a string or a buffer';
+var MSG_INVALID_SIGNER_KEY = 'key must be a string, a buffer or an object';
+
+var supportsKeyObjects = typeof crypto.createPublicKey === 'function';
+if (supportsKeyObjects) {
+  MSG_INVALID_VERIFIER_KEY += ' or a KeyObject';
+  MSG_INVALID_SECRET += 'or a KeyObject';
+}
+
+function checkIsPublicKey(key) {
+  if (Buffer.isBuffer(key)) {
+    return;
+  }
+
+  if (typeof key === 'string') {
+    return;
+  }
+
+  if (!supportsKeyObjects) {
+    throw typeError(MSG_INVALID_VERIFIER_KEY);
+  }
+
+  if (typeof key !== 'object') {
+    throw typeError(MSG_INVALID_VERIFIER_KEY);
+  }
+
+  if (typeof key.type !== 'string') {
+    throw typeError(MSG_INVALID_VERIFIER_KEY);
+  }
+
+  if (typeof key.asymmetricKeyType !== 'string') {
+    throw typeError(MSG_INVALID_VERIFIER_KEY);
+  }
+
+  if (typeof key.export !== 'function') {
+    throw typeError(MSG_INVALID_VERIFIER_KEY);
+  }
+};
+
+function checkIsPrivateKey(key) {
+  if (Buffer.isBuffer(key)) {
+    return;
+  }
+
+  if (typeof key === 'string') {
+    return;
+  }
+
+  if (typeof key === 'object') {
+    return;
+  }
+
+  throw typeError(MSG_INVALID_SIGNER_KEY);
+};
+
+function checkIsSecretKey(key) {
+  if (Buffer.isBuffer(key)) {
+    return;
+  }
+
+  if (typeof key === 'string') {
+    return key;
+  }
+
+  if (!supportsKeyObjects) {
+    throw typeError(MSG_INVALID_SECRET);
+  }
+
+  if (typeof key !== 'object') {
+    throw typeError(MSG_INVALID_SECRET);
+  }
+
+  if (key.type !== 'secret') {
+    throw typeError(MSG_INVALID_SECRET);
+  }
+
+  if (typeof key.export !== 'function') {
+    throw typeError(MSG_INVALID_SECRET);
+  }
+}
+
+function fromBase64(base64) {
+  return base64
+    .replace(/=/g, '')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_');
+}
+
+function toBase64(base64url) {
+  base64url = base64url.toString();
+
+  var padding = 4 - base64url.length % 4;
+  if (padding !== 4) {
+    for (var i = 0; i < padding; ++i) {
+      base64url += '=';
+    }
+  }
+
+  return base64url
+    .replace(/\-/g, '+')
+    .replace(/_/g, '/');
+}
+
+function typeError(template) {
+  var args = [].slice.call(arguments, 1);
+  var errMsg = util.format.bind(util, template).apply(null, args);
+  return new TypeError(errMsg);
+}
+
+function bufferOrString(obj) {
+  return Buffer.isBuffer(obj) || typeof obj === 'string';
+}
+
+function normalizeInput(thing) {
+  if (!bufferOrString(thing))
+    thing = JSON.stringify(thing);
+  return thing;
+}
+
+function createHmacSigner(bits) {
+  return function sign(thing, secret) {
+    checkIsSecretKey(secret);
+    thing = normalizeInput(thing);
+    var hmac = crypto.createHmac('sha' + bits, secret);
+    var sig = (hmac.update(thing), hmac.digest('base64'))
+    return fromBase64(sig);
+  }
+}
+
+function createHmacVerifier(bits) {
+  return function verify(thing, signature, secret) {
+    var computedSig = createHmacSigner(bits)(thing, secret);
+    return bufferEqual(Buffer.from(signature), Buffer.from(computedSig));
+  }
+}
+
+function createKeySigner(bits) {
+ return function sign(thing, privateKey) {
+    checkIsPrivateKey(privateKey);
+    thing = normalizeInput(thing);
+    // Even though we are specifying "RSA" here, this works with ECDSA
+    // keys as well.
+    var signer = crypto.createSign('RSA-SHA' + bits);
+    var sig = (signer.update(thing), signer.sign(privateKey, 'base64'));
+    return fromBase64(sig);
+  }
+}
+
+function createKeyVerifier(bits) {
+  return function verify(thing, signature, publicKey) {
+    checkIsPublicKey(publicKey);
+    thing = normalizeInput(thing);
+    signature = toBase64(signature);
+    var verifier = crypto.createVerify('RSA-SHA' + bits);
+    verifier.update(thing);
+    return verifier.verify(publicKey, signature, 'base64');
+  }
+}
+
+function createPSSKeySigner(bits) {
+  return function sign(thing, privateKey) {
+    checkIsPrivateKey(privateKey);
+    thing = normalizeInput(thing);
+    var signer = crypto.createSign('RSA-SHA' + bits);
+    var sig = (signer.update(thing), signer.sign({
+      key: privateKey,
+      padding: crypto.constants.RSA_PKCS1_PSS_PADDING,
+      saltLength: crypto.constants.RSA_PSS_SALTLEN_DIGEST
+    }, 'base64'));
+    return fromBase64(sig);
+  }
+}
+
+function createPSSKeyVerifier(bits) {
+  return function verify(thing, signature, publicKey) {
+    checkIsPublicKey(publicKey);
+    thing = normalizeInput(thing);
+    signature = toBase64(signature);
+    var verifier = crypto.createVerify('RSA-SHA' + bits);
+    verifier.update(thing);
+    return verifier.verify({
+      key: publicKey,
+      padding: crypto.constants.RSA_PKCS1_PSS_PADDING,
+      saltLength: crypto.constants.RSA_PSS_SALTLEN_DIGEST
+    }, signature, 'base64');
+  }
+}
+
+function createECDSASigner(bits) {
+  var inner = createKeySigner(bits);
+  return function sign() {
+    var signature = inner.apply(null, arguments);
+    signature = formatEcdsa.derToJose(signature, 'ES' + bits);
+    return signature;
+  };
+}
+
+function createECDSAVerifer(bits) {
+  var inner = createKeyVerifier(bits);
+  return function verify(thing, signature, publicKey) {
+    signature = formatEcdsa.joseToDer(signature, 'ES' + bits).toString('base64');
+    var result = inner(thing, signature, publicKey);
+    return result;
+  };
+}
+
+function createNoneSigner() {
+  return function sign() {
+    return '';
+  }
+}
+
+function createNoneVerifier() {
+  return function verify(thing, signature) {
+    return signature === '';
+  }
+}
+
+module.exports = function jwa(algorithm) {
+  var signerFactories = {
+    hs: createHmacSigner,
+    rs: createKeySigner,
+    ps: createPSSKeySigner,
+    es: createECDSASigner,
+    none: createNoneSigner,
+  }
+  var verifierFactories = {
+    hs: createHmacVerifier,
+    rs: createKeyVerifier,
+    ps: createPSSKeyVerifier,
+    es: createECDSAVerifer,
+    none: createNoneVerifier,
+  }
+  var match = algorithm.match(/^(RS|PS|ES|HS)(256|384|512)$|^(none)$/i);
+  if (!match)
+    throw typeError(MSG_INVALID_ALGORITHM, algorithm);
+  var algo = (match[1] || match[3]).toLowerCase();
+  var bits = match[2];
+
+  return {
+    sign: signerFactories[algo](bits),
+    verify: verifierFactories[algo](bits),
+  }
+};
+
+
+/***/ }),
+
+/***/ 4636:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+/*global exports*/
+var SignStream = __nccwpck_require__(3334);
+var VerifyStream = __nccwpck_require__(5522);
+
+var ALGORITHMS = [
+  'HS256', 'HS384', 'HS512',
+  'RS256', 'RS384', 'RS512',
+  'PS256', 'PS384', 'PS512',
+  'ES256', 'ES384', 'ES512'
+];
+
+exports.ALGORITHMS = ALGORITHMS;
+exports.sign = SignStream.sign;
+exports.verify = VerifyStream.verify;
+exports.decode = VerifyStream.decode;
+exports.isValid = VerifyStream.isValid;
+exports.createSign = function createSign(opts) {
+  return new SignStream(opts);
+};
+exports.createVerify = function createVerify(opts) {
+  return new VerifyStream(opts);
+};
+
+
+/***/ }),
+
+/***/ 1868:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+/*global module, process*/
+var Buffer = (__nccwpck_require__(1867).Buffer);
+var Stream = __nccwpck_require__(2781);
+var util = __nccwpck_require__(3837);
+
+function DataStream(data) {
+  this.buffer = null;
+  this.writable = true;
+  this.readable = true;
+
+  // No input
+  if (!data) {
+    this.buffer = Buffer.alloc(0);
+    return this;
+  }
+
+  // Stream
+  if (typeof data.pipe === 'function') {
+    this.buffer = Buffer.alloc(0);
+    data.pipe(this);
+    return this;
+  }
+
+  // Buffer or String
+  // or Object (assumedly a passworded key)
+  if (data.length || typeof data === 'object') {
+    this.buffer = data;
+    this.writable = false;
+    process.nextTick(function () {
+      this.emit('end', data);
+      this.readable = false;
+      this.emit('close');
+    }.bind(this));
+    return this;
+  }
+
+  throw new TypeError('Unexpected data type ('+ typeof data + ')');
+}
+util.inherits(DataStream, Stream);
+
+DataStream.prototype.write = function write(data) {
+  this.buffer = Buffer.concat([this.buffer, Buffer.from(data)]);
+  this.emit('data', data);
+};
+
+DataStream.prototype.end = function end(data) {
+  if (data)
+    this.write(data);
+  this.emit('end', data);
+  this.emit('close');
+  this.writable = false;
+  this.readable = false;
+};
+
+module.exports = DataStream;
+
+
+/***/ }),
+
+/***/ 3334:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+/*global module*/
+var Buffer = (__nccwpck_require__(1867).Buffer);
+var DataStream = __nccwpck_require__(1868);
+var jwa = __nccwpck_require__(6010);
+var Stream = __nccwpck_require__(2781);
+var toString = __nccwpck_require__(5292);
+var util = __nccwpck_require__(3837);
+
+function base64url(string, encoding) {
+  return Buffer
+    .from(string, encoding)
+    .toString('base64')
+    .replace(/=/g, '')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_');
+}
+
+function jwsSecuredInput(header, payload, encoding) {
+  encoding = encoding || 'utf8';
+  var encodedHeader = base64url(toString(header), 'binary');
+  var encodedPayload = base64url(toString(payload), encoding);
+  return util.format('%s.%s', encodedHeader, encodedPayload);
+}
+
+function jwsSign(opts) {
+  var header = opts.header;
+  var payload = opts.payload;
+  var secretOrKey = opts.secret || opts.privateKey;
+  var encoding = opts.encoding;
+  var algo = jwa(header.alg);
+  var securedInput = jwsSecuredInput(header, payload, encoding);
+  var signature = algo.sign(securedInput, secretOrKey);
+  return util.format('%s.%s', securedInput, signature);
+}
+
+function SignStream(opts) {
+  var secret = opts.secret||opts.privateKey||opts.key;
+  var secretStream = new DataStream(secret);
+  this.readable = true;
+  this.header = opts.header;
+  this.encoding = opts.encoding;
+  this.secret = this.privateKey = this.key = secretStream;
+  this.payload = new DataStream(opts.payload);
+  this.secret.once('close', function () {
+    if (!this.payload.writable && this.readable)
+      this.sign();
+  }.bind(this));
+
+  this.payload.once('close', function () {
+    if (!this.secret.writable && this.readable)
+      this.sign();
+  }.bind(this));
+}
+util.inherits(SignStream, Stream);
+
+SignStream.prototype.sign = function sign() {
+  try {
+    var signature = jwsSign({
+      header: this.header,
+      payload: this.payload.buffer,
+      secret: this.secret.buffer,
+      encoding: this.encoding
+    });
+    this.emit('done', signature);
+    this.emit('data', signature);
+    this.emit('end');
+    this.readable = false;
+    return signature;
+  } catch (e) {
+    this.readable = false;
+    this.emit('error', e);
+    this.emit('close');
+  }
+};
+
+SignStream.sign = jwsSign;
+
+module.exports = SignStream;
+
+
+/***/ }),
+
+/***/ 5292:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+/*global module*/
+var Buffer = (__nccwpck_require__(4300).Buffer);
+
+module.exports = function toString(obj) {
+  if (typeof obj === 'string')
+    return obj;
+  if (typeof obj === 'number' || Buffer.isBuffer(obj))
+    return obj.toString();
+  return JSON.stringify(obj);
+};
+
+
+/***/ }),
+
+/***/ 5522:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+/*global module*/
+var Buffer = (__nccwpck_require__(1867).Buffer);
+var DataStream = __nccwpck_require__(1868);
+var jwa = __nccwpck_require__(6010);
+var Stream = __nccwpck_require__(2781);
+var toString = __nccwpck_require__(5292);
+var util = __nccwpck_require__(3837);
+var JWS_REGEX = /^[a-zA-Z0-9\-_]+?\.[a-zA-Z0-9\-_]+?\.([a-zA-Z0-9\-_]+)?$/;
+
+function isObject(thing) {
+  return Object.prototype.toString.call(thing) === '[object Object]';
+}
+
+function safeJsonParse(thing) {
+  if (isObject(thing))
+    return thing;
+  try { return JSON.parse(thing); }
+  catch (e) { return undefined; }
+}
+
+function headerFromJWS(jwsSig) {
+  var encodedHeader = jwsSig.split('.', 1)[0];
+  return safeJsonParse(Buffer.from(encodedHeader, 'base64').toString('binary'));
+}
+
+function securedInputFromJWS(jwsSig) {
+  return jwsSig.split('.', 2).join('.');
+}
+
+function signatureFromJWS(jwsSig) {
+  return jwsSig.split('.')[2];
+}
+
+function payloadFromJWS(jwsSig, encoding) {
+  encoding = encoding || 'utf8';
+  var payload = jwsSig.split('.')[1];
+  return Buffer.from(payload, 'base64').toString(encoding);
+}
+
+function isValidJws(string) {
+  return JWS_REGEX.test(string) && !!headerFromJWS(string);
+}
+
+function jwsVerify(jwsSig, algorithm, secretOrKey) {
+  if (!algorithm) {
+    var err = new Error("Missing algorithm parameter for jws.verify");
+    err.code = "MISSING_ALGORITHM";
+    throw err;
+  }
+  jwsSig = toString(jwsSig);
+  var signature = signatureFromJWS(jwsSig);
+  var securedInput = securedInputFromJWS(jwsSig);
+  var algo = jwa(algorithm);
+  return algo.verify(securedInput, signature, secretOrKey);
+}
+
+function jwsDecode(jwsSig, opts) {
+  opts = opts || {};
+  jwsSig = toString(jwsSig);
+
+  if (!isValidJws(jwsSig))
+    return null;
+
+  var header = headerFromJWS(jwsSig);
+
+  if (!header)
+    return null;
+
+  var payload = payloadFromJWS(jwsSig);
+  if (header.typ === 'JWT' || opts.json)
+    payload = JSON.parse(payload, opts.encoding);
+
+  return {
+    header: header,
+    payload: payload,
+    signature: signatureFromJWS(jwsSig)
+  };
+}
+
+function VerifyStream(opts) {
+  opts = opts || {};
+  var secretOrKey = opts.secret||opts.publicKey||opts.key;
+  var secretStream = new DataStream(secretOrKey);
+  this.readable = true;
+  this.algorithm = opts.algorithm;
+  this.encoding = opts.encoding;
+  this.secret = this.publicKey = this.key = secretStream;
+  this.signature = new DataStream(opts.signature);
+  this.secret.once('close', function () {
+    if (!this.signature.writable && this.readable)
+      this.verify();
+  }.bind(this));
+
+  this.signature.once('close', function () {
+    if (!this.secret.writable && this.readable)
+      this.verify();
+  }.bind(this));
+}
+util.inherits(VerifyStream, Stream);
+VerifyStream.prototype.verify = function verify() {
+  try {
+    var valid = jwsVerify(this.signature.buffer, this.algorithm, this.key.buffer);
+    var obj = jwsDecode(this.signature.buffer, this.encoding);
+    this.emit('done', valid, obj);
+    this.emit('data', valid);
+    this.emit('end');
+    this.readable = false;
+    return valid;
+  } catch (e) {
+    this.readable = false;
+    this.emit('error', e);
+    this.emit('close');
+  }
+};
+
+VerifyStream.decode = jwsDecode;
+VerifyStream.isValid = isValidJws;
+VerifyStream.verify = jwsVerify;
+
+module.exports = VerifyStream;
+
+
+/***/ }),
+
+/***/ 7931:
+/***/ ((module) => {
+
+/**
+ * lodash (Custom Build) <https://lodash.com/>
+ * Build: `lodash modularize exports="npm" -o ./`
+ * Copyright jQuery Foundation and other contributors <https://jquery.org/>
+ * Released under MIT license <https://lodash.com/license>
+ * Based on Underscore.js 1.8.3 <http://underscorejs.org/LICENSE>
+ * Copyright Jeremy Ashkenas, DocumentCloud and Investigative Reporters & Editors
+ */
+
+/** Used as references for various `Number` constants. */
+var INFINITY = 1 / 0,
+    MAX_SAFE_INTEGER = 9007199254740991,
+    MAX_INTEGER = 1.7976931348623157e+308,
+    NAN = 0 / 0;
+
+/** `Object#toString` result references. */
+var argsTag = '[object Arguments]',
+    funcTag = '[object Function]',
+    genTag = '[object GeneratorFunction]',
+    stringTag = '[object String]',
+    symbolTag = '[object Symbol]';
+
+/** Used to match leading and trailing whitespace. */
+var reTrim = /^\s+|\s+$/g;
+
+/** Used to detect bad signed hexadecimal string values. */
+var reIsBadHex = /^[-+]0x[0-9a-f]+$/i;
+
+/** Used to detect binary string values. */
+var reIsBinary = /^0b[01]+$/i;
+
+/** Used to detect octal string values. */
+var reIsOctal = /^0o[0-7]+$/i;
+
+/** Used to detect unsigned integer values. */
+var reIsUint = /^(?:0|[1-9]\d*)$/;
+
+/** Built-in method references without a dependency on `root`. */
+var freeParseInt = parseInt;
+
+/**
+ * A specialized version of `_.map` for arrays without support for iteratee
+ * shorthands.
+ *
+ * @private
+ * @param {Array} [array] The array to iterate over.
+ * @param {Function} iteratee The function invoked per iteration.
+ * @returns {Array} Returns the new mapped array.
+ */
+function arrayMap(array, iteratee) {
+  var index = -1,
+      length = array ? array.length : 0,
+      result = Array(length);
+
+  while (++index < length) {
+    result[index] = iteratee(array[index], index, array);
+  }
+  return result;
+}
+
+/**
+ * The base implementation of `_.findIndex` and `_.findLastIndex` without
+ * support for iteratee shorthands.
+ *
+ * @private
+ * @param {Array} array The array to inspect.
+ * @param {Function} predicate The function invoked per iteration.
+ * @param {number} fromIndex The index to search from.
+ * @param {boolean} [fromRight] Specify iterating from right to left.
+ * @returns {number} Returns the index of the matched value, else `-1`.
+ */
+function baseFindIndex(array, predicate, fromIndex, fromRight) {
+  var length = array.length,
+      index = fromIndex + (fromRight ? 1 : -1);
+
+  while ((fromRight ? index-- : ++index < length)) {
+    if (predicate(array[index], index, array)) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+/**
+ * The base implementation of `_.indexOf` without `fromIndex` bounds checks.
+ *
+ * @private
+ * @param {Array} array The array to inspect.
+ * @param {*} value The value to search for.
+ * @param {number} fromIndex The index to search from.
+ * @returns {number} Returns the index of the matched value, else `-1`.
+ */
+function baseIndexOf(array, value, fromIndex) {
+  if (value !== value) {
+    return baseFindIndex(array, baseIsNaN, fromIndex);
+  }
+  var index = fromIndex - 1,
+      length = array.length;
+
+  while (++index < length) {
+    if (array[index] === value) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+/**
+ * The base implementation of `_.isNaN` without support for number objects.
+ *
+ * @private
+ * @param {*} value The value to check.
+ * @returns {boolean} Returns `true` if `value` is `NaN`, else `false`.
+ */
+function baseIsNaN(value) {
+  return value !== value;
+}
+
+/**
+ * The base implementation of `_.times` without support for iteratee shorthands
+ * or max array length checks.
+ *
+ * @private
+ * @param {number} n The number of times to invoke `iteratee`.
+ * @param {Function} iteratee The function invoked per iteration.
+ * @returns {Array} Returns the array of results.
+ */
+function baseTimes(n, iteratee) {
+  var index = -1,
+      result = Array(n);
+
+  while (++index < n) {
+    result[index] = iteratee(index);
+  }
+  return result;
+}
+
+/**
+ * The base implementation of `_.values` and `_.valuesIn` which creates an
+ * array of `object` property values corresponding to the property names
+ * of `props`.
+ *
+ * @private
+ * @param {Object} object The object to query.
+ * @param {Array} props The property names to get values for.
+ * @returns {Object} Returns the array of property values.
+ */
+function baseValues(object, props) {
+  return arrayMap(props, function(key) {
+    return object[key];
+  });
+}
+
+/**
+ * Creates a unary function that invokes `func` with its argument transformed.
+ *
+ * @private
+ * @param {Function} func The function to wrap.
+ * @param {Function} transform The argument transform.
+ * @returns {Function} Returns the new function.
+ */
+function overArg(func, transform) {
+  return function(arg) {
+    return func(transform(arg));
+  };
+}
+
+/** Used for built-in method references. */
+var objectProto = Object.prototype;
+
+/** Used to check objects for own properties. */
+var hasOwnProperty = objectProto.hasOwnProperty;
+
+/**
+ * Used to resolve the
+ * [`toStringTag`](http://ecma-international.org/ecma-262/7.0/#sec-object.prototype.tostring)
+ * of values.
+ */
+var objectToString = objectProto.toString;
+
+/** Built-in value references. */
+var propertyIsEnumerable = objectProto.propertyIsEnumerable;
+
+/* Built-in method references for those with the same name as other `lodash` methods. */
+var nativeKeys = overArg(Object.keys, Object),
+    nativeMax = Math.max;
+
+/**
+ * Creates an array of the enumerable property names of the array-like `value`.
+ *
+ * @private
+ * @param {*} value The value to query.
+ * @param {boolean} inherited Specify returning inherited property names.
+ * @returns {Array} Returns the array of property names.
+ */
+function arrayLikeKeys(value, inherited) {
+  // Safari 8.1 makes `arguments.callee` enumerable in strict mode.
+  // Safari 9 makes `arguments.length` enumerable in strict mode.
+  var result = (isArray(value) || isArguments(value))
+    ? baseTimes(value.length, String)
+    : [];
+
+  var length = result.length,
+      skipIndexes = !!length;
+
+  for (var key in value) {
+    if ((inherited || hasOwnProperty.call(value, key)) &&
+        !(skipIndexes && (key == 'length' || isIndex(key, length)))) {
+      result.push(key);
+    }
+  }
+  return result;
+}
+
+/**
+ * The base implementation of `_.keys` which doesn't treat sparse arrays as dense.
+ *
+ * @private
+ * @param {Object} object The object to query.
+ * @returns {Array} Returns the array of property names.
+ */
+function baseKeys(object) {
+  if (!isPrototype(object)) {
+    return nativeKeys(object);
+  }
+  var result = [];
+  for (var key in Object(object)) {
+    if (hasOwnProperty.call(object, key) && key != 'constructor') {
+      result.push(key);
+    }
+  }
+  return result;
+}
+
+/**
+ * Checks if `value` is a valid array-like index.
+ *
+ * @private
+ * @param {*} value The value to check.
+ * @param {number} [length=MAX_SAFE_INTEGER] The upper bounds of a valid index.
+ * @returns {boolean} Returns `true` if `value` is a valid index, else `false`.
+ */
+function isIndex(value, length) {
+  length = length == null ? MAX_SAFE_INTEGER : length;
+  return !!length &&
+    (typeof value == 'number' || reIsUint.test(value)) &&
+    (value > -1 && value % 1 == 0 && value < length);
+}
+
+/**
+ * Checks if `value` is likely a prototype object.
+ *
+ * @private
+ * @param {*} value The value to check.
+ * @returns {boolean} Returns `true` if `value` is a prototype, else `false`.
+ */
+function isPrototype(value) {
+  var Ctor = value && value.constructor,
+      proto = (typeof Ctor == 'function' && Ctor.prototype) || objectProto;
+
+  return value === proto;
+}
+
+/**
+ * Checks if `value` is in `collection`. If `collection` is a string, it's
+ * checked for a substring of `value`, otherwise
+ * [`SameValueZero`](http://ecma-international.org/ecma-262/7.0/#sec-samevaluezero)
+ * is used for equality comparisons. If `fromIndex` is negative, it's used as
+ * the offset from the end of `collection`.
+ *
+ * @static
+ * @memberOf _
+ * @since 0.1.0
+ * @category Collection
+ * @param {Array|Object|string} collection The collection to inspect.
+ * @param {*} value The value to search for.
+ * @param {number} [fromIndex=0] The index to search from.
+ * @param- {Object} [guard] Enables use as an iteratee for methods like `_.reduce`.
+ * @returns {boolean} Returns `true` if `value` is found, else `false`.
+ * @example
+ *
+ * _.includes([1, 2, 3], 1);
+ * // => true
+ *
+ * _.includes([1, 2, 3], 1, 2);
+ * // => false
+ *
+ * _.includes({ 'a': 1, 'b': 2 }, 1);
+ * // => true
+ *
+ * _.includes('abcd', 'bc');
+ * // => true
+ */
+function includes(collection, value, fromIndex, guard) {
+  collection = isArrayLike(collection) ? collection : values(collection);
+  fromIndex = (fromIndex && !guard) ? toInteger(fromIndex) : 0;
+
+  var length = collection.length;
+  if (fromIndex < 0) {
+    fromIndex = nativeMax(length + fromIndex, 0);
+  }
+  return isString(collection)
+    ? (fromIndex <= length && collection.indexOf(value, fromIndex) > -1)
+    : (!!length && baseIndexOf(collection, value, fromIndex) > -1);
+}
+
+/**
+ * Checks if `value` is likely an `arguments` object.
+ *
+ * @static
+ * @memberOf _
+ * @since 0.1.0
+ * @category Lang
+ * @param {*} value The value to check.
+ * @returns {boolean} Returns `true` if `value` is an `arguments` object,
+ *  else `false`.
+ * @example
+ *
+ * _.isArguments(function() { return arguments; }());
+ * // => true
+ *
+ * _.isArguments([1, 2, 3]);
+ * // => false
+ */
+function isArguments(value) {
+  // Safari 8.1 makes `arguments.callee` enumerable in strict mode.
+  return isArrayLikeObject(value) && hasOwnProperty.call(value, 'callee') &&
+    (!propertyIsEnumerable.call(value, 'callee') || objectToString.call(value) == argsTag);
+}
+
+/**
+ * Checks if `value` is classified as an `Array` object.
+ *
+ * @static
+ * @memberOf _
+ * @since 0.1.0
+ * @category Lang
+ * @param {*} value The value to check.
+ * @returns {boolean} Returns `true` if `value` is an array, else `false`.
+ * @example
+ *
+ * _.isArray([1, 2, 3]);
+ * // => true
+ *
+ * _.isArray(document.body.children);
+ * // => false
+ *
+ * _.isArray('abc');
+ * // => false
+ *
+ * _.isArray(_.noop);
+ * // => false
+ */
+var isArray = Array.isArray;
+
+/**
+ * Checks if `value` is array-like. A value is considered array-like if it's
+ * not a function and has a `value.length` that's an integer greater than or
+ * equal to `0` and less than or equal to `Number.MAX_SAFE_INTEGER`.
+ *
+ * @static
+ * @memberOf _
+ * @since 4.0.0
+ * @category Lang
+ * @param {*} value The value to check.
+ * @returns {boolean} Returns `true` if `value` is array-like, else `false`.
+ * @example
+ *
+ * _.isArrayLike([1, 2, 3]);
+ * // => true
+ *
+ * _.isArrayLike(document.body.children);
+ * // => true
+ *
+ * _.isArrayLike('abc');
+ * // => true
+ *
+ * _.isArrayLike(_.noop);
+ * // => false
+ */
+function isArrayLike(value) {
+  return value != null && isLength(value.length) && !isFunction(value);
+}
+
+/**
+ * This method is like `_.isArrayLike` except that it also checks if `value`
+ * is an object.
+ *
+ * @static
+ * @memberOf _
+ * @since 4.0.0
+ * @category Lang
+ * @param {*} value The value to check.
+ * @returns {boolean} Returns `true` if `value` is an array-like object,
+ *  else `false`.
+ * @example
+ *
+ * _.isArrayLikeObject([1, 2, 3]);
+ * // => true
+ *
+ * _.isArrayLikeObject(document.body.children);
+ * // => true
+ *
+ * _.isArrayLikeObject('abc');
+ * // => false
+ *
+ * _.isArrayLikeObject(_.noop);
+ * // => false
+ */
+function isArrayLikeObject(value) {
+  return isObjectLike(value) && isArrayLike(value);
+}
+
+/**
+ * Checks if `value` is classified as a `Function` object.
+ *
+ * @static
+ * @memberOf _
+ * @since 0.1.0
+ * @category Lang
+ * @param {*} value The value to check.
+ * @returns {boolean} Returns `true` if `value` is a function, else `false`.
+ * @example
+ *
+ * _.isFunction(_);
+ * // => true
+ *
+ * _.isFunction(/abc/);
+ * // => false
+ */
+function isFunction(value) {
+  // The use of `Object#toString` avoids issues with the `typeof` operator
+  // in Safari 8-9 which returns 'object' for typed array and other constructors.
+  var tag = isObject(value) ? objectToString.call(value) : '';
+  return tag == funcTag || tag == genTag;
+}
+
+/**
+ * Checks if `value` is a valid array-like length.
+ *
+ * **Note:** This method is loosely based on
+ * [`ToLength`](http://ecma-international.org/ecma-262/7.0/#sec-tolength).
+ *
+ * @static
+ * @memberOf _
+ * @since 4.0.0
+ * @category Lang
+ * @param {*} value The value to check.
+ * @returns {boolean} Returns `true` if `value` is a valid length, else `false`.
+ * @example
+ *
+ * _.isLength(3);
+ * // => true
+ *
+ * _.isLength(Number.MIN_VALUE);
+ * // => false
+ *
+ * _.isLength(Infinity);
+ * // => false
+ *
+ * _.isLength('3');
+ * // => false
+ */
+function isLength(value) {
+  return typeof value == 'number' &&
+    value > -1 && value % 1 == 0 && value <= MAX_SAFE_INTEGER;
+}
+
+/**
+ * Checks if `value` is the
+ * [language type](http://www.ecma-international.org/ecma-262/7.0/#sec-ecmascript-language-types)
+ * of `Object`. (e.g. arrays, functions, objects, regexes, `new Number(0)`, and `new String('')`)
+ *
+ * @static
+ * @memberOf _
+ * @since 0.1.0
+ * @category Lang
+ * @param {*} value The value to check.
+ * @returns {boolean} Returns `true` if `value` is an object, else `false`.
+ * @example
+ *
+ * _.isObject({});
+ * // => true
+ *
+ * _.isObject([1, 2, 3]);
+ * // => true
+ *
+ * _.isObject(_.noop);
+ * // => true
+ *
+ * _.isObject(null);
+ * // => false
+ */
+function isObject(value) {
+  var type = typeof value;
+  return !!value && (type == 'object' || type == 'function');
+}
+
+/**
+ * Checks if `value` is object-like. A value is object-like if it's not `null`
+ * and has a `typeof` result of "object".
+ *
+ * @static
+ * @memberOf _
+ * @since 4.0.0
+ * @category Lang
+ * @param {*} value The value to check.
+ * @returns {boolean} Returns `true` if `value` is object-like, else `false`.
+ * @example
+ *
+ * _.isObjectLike({});
+ * // => true
+ *
+ * _.isObjectLike([1, 2, 3]);
+ * // => true
+ *
+ * _.isObjectLike(_.noop);
+ * // => false
+ *
+ * _.isObjectLike(null);
+ * // => false
+ */
+function isObjectLike(value) {
+  return !!value && typeof value == 'object';
+}
+
+/**
+ * Checks if `value` is classified as a `String` primitive or object.
+ *
+ * @static
+ * @since 0.1.0
+ * @memberOf _
+ * @category Lang
+ * @param {*} value The value to check.
+ * @returns {boolean} Returns `true` if `value` is a string, else `false`.
+ * @example
+ *
+ * _.isString('abc');
+ * // => true
+ *
+ * _.isString(1);
+ * // => false
+ */
+function isString(value) {
+  return typeof value == 'string' ||
+    (!isArray(value) && isObjectLike(value) && objectToString.call(value) == stringTag);
+}
+
+/**
+ * Checks if `value` is classified as a `Symbol` primitive or object.
+ *
+ * @static
+ * @memberOf _
+ * @since 4.0.0
+ * @category Lang
+ * @param {*} value The value to check.
+ * @returns {boolean} Returns `true` if `value` is a symbol, else `false`.
+ * @example
+ *
+ * _.isSymbol(Symbol.iterator);
+ * // => true
+ *
+ * _.isSymbol('abc');
+ * // => false
+ */
+function isSymbol(value) {
+  return typeof value == 'symbol' ||
+    (isObjectLike(value) && objectToString.call(value) == symbolTag);
+}
+
+/**
+ * Converts `value` to a finite number.
+ *
+ * @static
+ * @memberOf _
+ * @since 4.12.0
+ * @category Lang
+ * @param {*} value The value to convert.
+ * @returns {number} Returns the converted number.
+ * @example
+ *
+ * _.toFinite(3.2);
+ * // => 3.2
+ *
+ * _.toFinite(Number.MIN_VALUE);
+ * // => 5e-324
+ *
+ * _.toFinite(Infinity);
+ * // => 1.7976931348623157e+308
+ *
+ * _.toFinite('3.2');
+ * // => 3.2
+ */
+function toFinite(value) {
+  if (!value) {
+    return value === 0 ? value : 0;
+  }
+  value = toNumber(value);
+  if (value === INFINITY || value === -INFINITY) {
+    var sign = (value < 0 ? -1 : 1);
+    return sign * MAX_INTEGER;
+  }
+  return value === value ? value : 0;
+}
+
+/**
+ * Converts `value` to an integer.
+ *
+ * **Note:** This method is loosely based on
+ * [`ToInteger`](http://www.ecma-international.org/ecma-262/7.0/#sec-tointeger).
+ *
+ * @static
+ * @memberOf _
+ * @since 4.0.0
+ * @category Lang
+ * @param {*} value The value to convert.
+ * @returns {number} Returns the converted integer.
+ * @example
+ *
+ * _.toInteger(3.2);
+ * // => 3
+ *
+ * _.toInteger(Number.MIN_VALUE);
+ * // => 0
+ *
+ * _.toInteger(Infinity);
+ * // => 1.7976931348623157e+308
+ *
+ * _.toInteger('3.2');
+ * // => 3
+ */
+function toInteger(value) {
+  var result = toFinite(value),
+      remainder = result % 1;
+
+  return result === result ? (remainder ? result - remainder : result) : 0;
+}
+
+/**
+ * Converts `value` to a number.
+ *
+ * @static
+ * @memberOf _
+ * @since 4.0.0
+ * @category Lang
+ * @param {*} value The value to process.
+ * @returns {number} Returns the number.
+ * @example
+ *
+ * _.toNumber(3.2);
+ * // => 3.2
+ *
+ * _.toNumber(Number.MIN_VALUE);
+ * // => 5e-324
+ *
+ * _.toNumber(Infinity);
+ * // => Infinity
+ *
+ * _.toNumber('3.2');
+ * // => 3.2
+ */
+function toNumber(value) {
+  if (typeof value == 'number') {
+    return value;
+  }
+  if (isSymbol(value)) {
+    return NAN;
+  }
+  if (isObject(value)) {
+    var other = typeof value.valueOf == 'function' ? value.valueOf() : value;
+    value = isObject(other) ? (other + '') : other;
+  }
+  if (typeof value != 'string') {
+    return value === 0 ? value : +value;
+  }
+  value = value.replace(reTrim, '');
+  var isBinary = reIsBinary.test(value);
+  return (isBinary || reIsOctal.test(value))
+    ? freeParseInt(value.slice(2), isBinary ? 2 : 8)
+    : (reIsBadHex.test(value) ? NAN : +value);
+}
+
+/**
+ * Creates an array of the own enumerable property names of `object`.
+ *
+ * **Note:** Non-object values are coerced to objects. See the
+ * [ES spec](http://ecma-international.org/ecma-262/7.0/#sec-object.keys)
+ * for more details.
+ *
+ * @static
+ * @since 0.1.0
+ * @memberOf _
+ * @category Object
+ * @param {Object} object The object to query.
+ * @returns {Array} Returns the array of property names.
+ * @example
+ *
+ * function Foo() {
+ *   this.a = 1;
+ *   this.b = 2;
+ * }
+ *
+ * Foo.prototype.c = 3;
+ *
+ * _.keys(new Foo);
+ * // => ['a', 'b'] (iteration order is not guaranteed)
+ *
+ * _.keys('hi');
+ * // => ['0', '1']
+ */
+function keys(object) {
+  return isArrayLike(object) ? arrayLikeKeys(object) : baseKeys(object);
+}
+
+/**
+ * Creates an array of the own enumerable string keyed property values of `object`.
+ *
+ * **Note:** Non-object values are coerced to objects.
+ *
+ * @static
+ * @since 0.1.0
+ * @memberOf _
+ * @category Object
+ * @param {Object} object The object to query.
+ * @returns {Array} Returns the array of property values.
+ * @example
+ *
+ * function Foo() {
+ *   this.a = 1;
+ *   this.b = 2;
+ * }
+ *
+ * Foo.prototype.c = 3;
+ *
+ * _.values(new Foo);
+ * // => [1, 2] (iteration order is not guaranteed)
+ *
+ * _.values('hi');
+ * // => ['h', 'i']
+ */
+function values(object) {
+  return object ? baseValues(object, keys(object)) : [];
+}
+
+module.exports = includes;
+
+
+/***/ }),
+
+/***/ 6501:
+/***/ ((module) => {
+
+/**
+ * lodash 3.0.3 (Custom Build) <https://lodash.com/>
+ * Build: `lodash modularize exports="npm" -o ./`
+ * Copyright 2012-2016 The Dojo Foundation <http://dojofoundation.org/>
+ * Based on Underscore.js 1.8.3 <http://underscorejs.org/LICENSE>
+ * Copyright 2009-2016 Jeremy Ashkenas, DocumentCloud and Investigative Reporters & Editors
+ * Available under MIT license <https://lodash.com/license>
+ */
+
+/** `Object#toString` result references. */
+var boolTag = '[object Boolean]';
+
+/** Used for built-in method references. */
+var objectProto = Object.prototype;
+
+/**
+ * Used to resolve the [`toStringTag`](http://ecma-international.org/ecma-262/6.0/#sec-object.prototype.tostring)
+ * of values.
+ */
+var objectToString = objectProto.toString;
+
+/**
+ * Checks if `value` is classified as a boolean primitive or object.
+ *
+ * @static
+ * @memberOf _
+ * @category Lang
+ * @param {*} value The value to check.
+ * @returns {boolean} Returns `true` if `value` is correctly classified, else `false`.
+ * @example
+ *
+ * _.isBoolean(false);
+ * // => true
+ *
+ * _.isBoolean(null);
+ * // => false
+ */
+function isBoolean(value) {
+  return value === true || value === false ||
+    (isObjectLike(value) && objectToString.call(value) == boolTag);
+}
+
+/**
+ * Checks if `value` is object-like. A value is object-like if it's not `null`
+ * and has a `typeof` result of "object".
+ *
+ * @static
+ * @memberOf _
+ * @category Lang
+ * @param {*} value The value to check.
+ * @returns {boolean} Returns `true` if `value` is object-like, else `false`.
+ * @example
+ *
+ * _.isObjectLike({});
+ * // => true
+ *
+ * _.isObjectLike([1, 2, 3]);
+ * // => true
+ *
+ * _.isObjectLike(_.noop);
+ * // => false
+ *
+ * _.isObjectLike(null);
+ * // => false
+ */
+function isObjectLike(value) {
+  return !!value && typeof value == 'object';
+}
+
+module.exports = isBoolean;
+
+
+/***/ }),
+
+/***/ 1441:
+/***/ ((module) => {
+
+/**
+ * lodash (Custom Build) <https://lodash.com/>
+ * Build: `lodash modularize exports="npm" -o ./`
+ * Copyright jQuery Foundation and other contributors <https://jquery.org/>
+ * Released under MIT license <https://lodash.com/license>
+ * Based on Underscore.js 1.8.3 <http://underscorejs.org/LICENSE>
+ * Copyright Jeremy Ashkenas, DocumentCloud and Investigative Reporters & Editors
+ */
+
+/** Used as references for various `Number` constants. */
+var INFINITY = 1 / 0,
+    MAX_INTEGER = 1.7976931348623157e+308,
+    NAN = 0 / 0;
+
+/** `Object#toString` result references. */
+var symbolTag = '[object Symbol]';
+
+/** Used to match leading and trailing whitespace. */
+var reTrim = /^\s+|\s+$/g;
+
+/** Used to detect bad signed hexadecimal string values. */
+var reIsBadHex = /^[-+]0x[0-9a-f]+$/i;
+
+/** Used to detect binary string values. */
+var reIsBinary = /^0b[01]+$/i;
+
+/** Used to detect octal string values. */
+var reIsOctal = /^0o[0-7]+$/i;
+
+/** Built-in method references without a dependency on `root`. */
+var freeParseInt = parseInt;
+
+/** Used for built-in method references. */
+var objectProto = Object.prototype;
+
+/**
+ * Used to resolve the
+ * [`toStringTag`](http://ecma-international.org/ecma-262/7.0/#sec-object.prototype.tostring)
+ * of values.
+ */
+var objectToString = objectProto.toString;
+
+/**
+ * Checks if `value` is an integer.
+ *
+ * **Note:** This method is based on
+ * [`Number.isInteger`](https://mdn.io/Number/isInteger).
+ *
+ * @static
+ * @memberOf _
+ * @since 4.0.0
+ * @category Lang
+ * @param {*} value The value to check.
+ * @returns {boolean} Returns `true` if `value` is an integer, else `false`.
+ * @example
+ *
+ * _.isInteger(3);
+ * // => true
+ *
+ * _.isInteger(Number.MIN_VALUE);
+ * // => false
+ *
+ * _.isInteger(Infinity);
+ * // => false
+ *
+ * _.isInteger('3');
+ * // => false
+ */
+function isInteger(value) {
+  return typeof value == 'number' && value == toInteger(value);
+}
+
+/**
+ * Checks if `value` is the
+ * [language type](http://www.ecma-international.org/ecma-262/7.0/#sec-ecmascript-language-types)
+ * of `Object`. (e.g. arrays, functions, objects, regexes, `new Number(0)`, and `new String('')`)
+ *
+ * @static
+ * @memberOf _
+ * @since 0.1.0
+ * @category Lang
+ * @param {*} value The value to check.
+ * @returns {boolean} Returns `true` if `value` is an object, else `false`.
+ * @example
+ *
+ * _.isObject({});
+ * // => true
+ *
+ * _.isObject([1, 2, 3]);
+ * // => true
+ *
+ * _.isObject(_.noop);
+ * // => true
+ *
+ * _.isObject(null);
+ * // => false
+ */
+function isObject(value) {
+  var type = typeof value;
+  return !!value && (type == 'object' || type == 'function');
+}
+
+/**
+ * Checks if `value` is object-like. A value is object-like if it's not `null`
+ * and has a `typeof` result of "object".
+ *
+ * @static
+ * @memberOf _
+ * @since 4.0.0
+ * @category Lang
+ * @param {*} value The value to check.
+ * @returns {boolean} Returns `true` if `value` is object-like, else `false`.
+ * @example
+ *
+ * _.isObjectLike({});
+ * // => true
+ *
+ * _.isObjectLike([1, 2, 3]);
+ * // => true
+ *
+ * _.isObjectLike(_.noop);
+ * // => false
+ *
+ * _.isObjectLike(null);
+ * // => false
+ */
+function isObjectLike(value) {
+  return !!value && typeof value == 'object';
+}
+
+/**
+ * Checks if `value` is classified as a `Symbol` primitive or object.
+ *
+ * @static
+ * @memberOf _
+ * @since 4.0.0
+ * @category Lang
+ * @param {*} value The value to check.
+ * @returns {boolean} Returns `true` if `value` is a symbol, else `false`.
+ * @example
+ *
+ * _.isSymbol(Symbol.iterator);
+ * // => true
+ *
+ * _.isSymbol('abc');
+ * // => false
+ */
+function isSymbol(value) {
+  return typeof value == 'symbol' ||
+    (isObjectLike(value) && objectToString.call(value) == symbolTag);
+}
+
+/**
+ * Converts `value` to a finite number.
+ *
+ * @static
+ * @memberOf _
+ * @since 4.12.0
+ * @category Lang
+ * @param {*} value The value to convert.
+ * @returns {number} Returns the converted number.
+ * @example
+ *
+ * _.toFinite(3.2);
+ * // => 3.2
+ *
+ * _.toFinite(Number.MIN_VALUE);
+ * // => 5e-324
+ *
+ * _.toFinite(Infinity);
+ * // => 1.7976931348623157e+308
+ *
+ * _.toFinite('3.2');
+ * // => 3.2
+ */
+function toFinite(value) {
+  if (!value) {
+    return value === 0 ? value : 0;
+  }
+  value = toNumber(value);
+  if (value === INFINITY || value === -INFINITY) {
+    var sign = (value < 0 ? -1 : 1);
+    return sign * MAX_INTEGER;
+  }
+  return value === value ? value : 0;
+}
+
+/**
+ * Converts `value` to an integer.
+ *
+ * **Note:** This method is loosely based on
+ * [`ToInteger`](http://www.ecma-international.org/ecma-262/7.0/#sec-tointeger).
+ *
+ * @static
+ * @memberOf _
+ * @since 4.0.0
+ * @category Lang
+ * @param {*} value The value to convert.
+ * @returns {number} Returns the converted integer.
+ * @example
+ *
+ * _.toInteger(3.2);
+ * // => 3
+ *
+ * _.toInteger(Number.MIN_VALUE);
+ * // => 0
+ *
+ * _.toInteger(Infinity);
+ * // => 1.7976931348623157e+308
+ *
+ * _.toInteger('3.2');
+ * // => 3
+ */
+function toInteger(value) {
+  var result = toFinite(value),
+      remainder = result % 1;
+
+  return result === result ? (remainder ? result - remainder : result) : 0;
+}
+
+/**
+ * Converts `value` to a number.
+ *
+ * @static
+ * @memberOf _
+ * @since 4.0.0
+ * @category Lang
+ * @param {*} value The value to process.
+ * @returns {number} Returns the number.
+ * @example
+ *
+ * _.toNumber(3.2);
+ * // => 3.2
+ *
+ * _.toNumber(Number.MIN_VALUE);
+ * // => 5e-324
+ *
+ * _.toNumber(Infinity);
+ * // => Infinity
+ *
+ * _.toNumber('3.2');
+ * // => 3.2
+ */
+function toNumber(value) {
+  if (typeof value == 'number') {
+    return value;
+  }
+  if (isSymbol(value)) {
+    return NAN;
+  }
+  if (isObject(value)) {
+    var other = typeof value.valueOf == 'function' ? value.valueOf() : value;
+    value = isObject(other) ? (other + '') : other;
+  }
+  if (typeof value != 'string') {
+    return value === 0 ? value : +value;
+  }
+  value = value.replace(reTrim, '');
+  var isBinary = reIsBinary.test(value);
+  return (isBinary || reIsOctal.test(value))
+    ? freeParseInt(value.slice(2), isBinary ? 2 : 8)
+    : (reIsBadHex.test(value) ? NAN : +value);
+}
+
+module.exports = isInteger;
+
+
+/***/ }),
+
+/***/ 298:
+/***/ ((module) => {
+
+/**
+ * lodash 3.0.3 (Custom Build) <https://lodash.com/>
+ * Build: `lodash modularize exports="npm" -o ./`
+ * Copyright 2012-2016 The Dojo Foundation <http://dojofoundation.org/>
+ * Based on Underscore.js 1.8.3 <http://underscorejs.org/LICENSE>
+ * Copyright 2009-2016 Jeremy Ashkenas, DocumentCloud and Investigative Reporters & Editors
+ * Available under MIT license <https://lodash.com/license>
+ */
+
+/** `Object#toString` result references. */
+var numberTag = '[object Number]';
+
+/** Used for built-in method references. */
+var objectProto = Object.prototype;
+
+/**
+ * Used to resolve the [`toStringTag`](http://ecma-international.org/ecma-262/6.0/#sec-object.prototype.tostring)
+ * of values.
+ */
+var objectToString = objectProto.toString;
+
+/**
+ * Checks if `value` is object-like. A value is object-like if it's not `null`
+ * and has a `typeof` result of "object".
+ *
+ * @static
+ * @memberOf _
+ * @category Lang
+ * @param {*} value The value to check.
+ * @returns {boolean} Returns `true` if `value` is object-like, else `false`.
+ * @example
+ *
+ * _.isObjectLike({});
+ * // => true
+ *
+ * _.isObjectLike([1, 2, 3]);
+ * // => true
+ *
+ * _.isObjectLike(_.noop);
+ * // => false
+ *
+ * _.isObjectLike(null);
+ * // => false
+ */
+function isObjectLike(value) {
+  return !!value && typeof value == 'object';
+}
+
+/**
+ * Checks if `value` is classified as a `Number` primitive or object.
+ *
+ * **Note:** To exclude `Infinity`, `-Infinity`, and `NaN`, which are classified
+ * as numbers, use the `_.isFinite` method.
+ *
+ * @static
+ * @memberOf _
+ * @category Lang
+ * @param {*} value The value to check.
+ * @returns {boolean} Returns `true` if `value` is correctly classified, else `false`.
+ * @example
+ *
+ * _.isNumber(3);
+ * // => true
+ *
+ * _.isNumber(Number.MIN_VALUE);
+ * // => true
+ *
+ * _.isNumber(Infinity);
+ * // => true
+ *
+ * _.isNumber('3');
+ * // => false
+ */
+function isNumber(value) {
+  return typeof value == 'number' ||
+    (isObjectLike(value) && objectToString.call(value) == numberTag);
+}
+
+module.exports = isNumber;
+
+
+/***/ }),
+
+/***/ 5723:
+/***/ ((module) => {
+
+/**
+ * lodash (Custom Build) <https://lodash.com/>
+ * Build: `lodash modularize exports="npm" -o ./`
+ * Copyright jQuery Foundation and other contributors <https://jquery.org/>
+ * Released under MIT license <https://lodash.com/license>
+ * Based on Underscore.js 1.8.3 <http://underscorejs.org/LICENSE>
+ * Copyright Jeremy Ashkenas, DocumentCloud and Investigative Reporters & Editors
+ */
+
+/** `Object#toString` result references. */
+var objectTag = '[object Object]';
+
+/**
+ * Checks if `value` is a host object in IE < 9.
+ *
+ * @private
+ * @param {*} value The value to check.
+ * @returns {boolean} Returns `true` if `value` is a host object, else `false`.
+ */
+function isHostObject(value) {
+  // Many host objects are `Object` objects that can coerce to strings
+  // despite having improperly defined `toString` methods.
+  var result = false;
+  if (value != null && typeof value.toString != 'function') {
+    try {
+      result = !!(value + '');
+    } catch (e) {}
+  }
+  return result;
+}
+
+/**
+ * Creates a unary function that invokes `func` with its argument transformed.
+ *
+ * @private
+ * @param {Function} func The function to wrap.
+ * @param {Function} transform The argument transform.
+ * @returns {Function} Returns the new function.
+ */
+function overArg(func, transform) {
+  return function(arg) {
+    return func(transform(arg));
+  };
+}
+
+/** Used for built-in method references. */
+var funcProto = Function.prototype,
+    objectProto = Object.prototype;
+
+/** Used to resolve the decompiled source of functions. */
+var funcToString = funcProto.toString;
+
+/** Used to check objects for own properties. */
+var hasOwnProperty = objectProto.hasOwnProperty;
+
+/** Used to infer the `Object` constructor. */
+var objectCtorString = funcToString.call(Object);
+
+/**
+ * Used to resolve the
+ * [`toStringTag`](http://ecma-international.org/ecma-262/7.0/#sec-object.prototype.tostring)
+ * of values.
+ */
+var objectToString = objectProto.toString;
+
+/** Built-in value references. */
+var getPrototype = overArg(Object.getPrototypeOf, Object);
+
+/**
+ * Checks if `value` is object-like. A value is object-like if it's not `null`
+ * and has a `typeof` result of "object".
+ *
+ * @static
+ * @memberOf _
+ * @since 4.0.0
+ * @category Lang
+ * @param {*} value The value to check.
+ * @returns {boolean} Returns `true` if `value` is object-like, else `false`.
+ * @example
+ *
+ * _.isObjectLike({});
+ * // => true
+ *
+ * _.isObjectLike([1, 2, 3]);
+ * // => true
+ *
+ * _.isObjectLike(_.noop);
+ * // => false
+ *
+ * _.isObjectLike(null);
+ * // => false
+ */
+function isObjectLike(value) {
+  return !!value && typeof value == 'object';
+}
+
+/**
+ * Checks if `value` is a plain object, that is, an object created by the
+ * `Object` constructor or one with a `[[Prototype]]` of `null`.
+ *
+ * @static
+ * @memberOf _
+ * @since 0.8.0
+ * @category Lang
+ * @param {*} value The value to check.
+ * @returns {boolean} Returns `true` if `value` is a plain object, else `false`.
+ * @example
+ *
+ * function Foo() {
+ *   this.a = 1;
+ * }
+ *
+ * _.isPlainObject(new Foo);
+ * // => false
+ *
+ * _.isPlainObject([1, 2, 3]);
+ * // => false
+ *
+ * _.isPlainObject({ 'x': 0, 'y': 0 });
+ * // => true
+ *
+ * _.isPlainObject(Object.create(null));
+ * // => true
+ */
+function isPlainObject(value) {
+  if (!isObjectLike(value) ||
+      objectToString.call(value) != objectTag || isHostObject(value)) {
+    return false;
+  }
+  var proto = getPrototype(value);
+  if (proto === null) {
+    return true;
+  }
+  var Ctor = hasOwnProperty.call(proto, 'constructor') && proto.constructor;
+  return (typeof Ctor == 'function' &&
+    Ctor instanceof Ctor && funcToString.call(Ctor) == objectCtorString);
+}
+
+module.exports = isPlainObject;
+
+
+/***/ }),
+
+/***/ 5180:
+/***/ ((module) => {
+
+/**
+ * lodash 4.0.1 (Custom Build) <https://lodash.com/>
+ * Build: `lodash modularize exports="npm" -o ./`
+ * Copyright 2012-2016 The Dojo Foundation <http://dojofoundation.org/>
+ * Based on Underscore.js 1.8.3 <http://underscorejs.org/LICENSE>
+ * Copyright 2009-2016 Jeremy Ashkenas, DocumentCloud and Investigative Reporters & Editors
+ * Available under MIT license <https://lodash.com/license>
+ */
+
+/** `Object#toString` result references. */
+var stringTag = '[object String]';
+
+/** Used for built-in method references. */
+var objectProto = Object.prototype;
+
+/**
+ * Used to resolve the [`toStringTag`](http://ecma-international.org/ecma-262/6.0/#sec-object.prototype.tostring)
+ * of values.
+ */
+var objectToString = objectProto.toString;
+
+/**
+ * Checks if `value` is classified as an `Array` object.
+ *
+ * @static
+ * @memberOf _
+ * @type Function
+ * @category Lang
+ * @param {*} value The value to check.
+ * @returns {boolean} Returns `true` if `value` is correctly classified, else `false`.
+ * @example
+ *
+ * _.isArray([1, 2, 3]);
+ * // => true
+ *
+ * _.isArray(document.body.children);
+ * // => false
+ *
+ * _.isArray('abc');
+ * // => false
+ *
+ * _.isArray(_.noop);
+ * // => false
+ */
+var isArray = Array.isArray;
+
+/**
+ * Checks if `value` is object-like. A value is object-like if it's not `null`
+ * and has a `typeof` result of "object".
+ *
+ * @static
+ * @memberOf _
+ * @category Lang
+ * @param {*} value The value to check.
+ * @returns {boolean} Returns `true` if `value` is object-like, else `false`.
+ * @example
+ *
+ * _.isObjectLike({});
+ * // => true
+ *
+ * _.isObjectLike([1, 2, 3]);
+ * // => true
+ *
+ * _.isObjectLike(_.noop);
+ * // => false
+ *
+ * _.isObjectLike(null);
+ * // => false
+ */
+function isObjectLike(value) {
+  return !!value && typeof value == 'object';
+}
+
+/**
+ * Checks if `value` is classified as a `String` primitive or object.
+ *
+ * @static
+ * @memberOf _
+ * @category Lang
+ * @param {*} value The value to check.
+ * @returns {boolean} Returns `true` if `value` is correctly classified, else `false`.
+ * @example
+ *
+ * _.isString('abc');
+ * // => true
+ *
+ * _.isString(1);
+ * // => false
+ */
+function isString(value) {
+  return typeof value == 'string' ||
+    (!isArray(value) && isObjectLike(value) && objectToString.call(value) == stringTag);
+}
+
+module.exports = isString;
+
+
+/***/ }),
+
+/***/ 4499:
+/***/ ((module) => {
+
+/**
+ * lodash (Custom Build) <https://lodash.com/>
+ * Build: `lodash modularize exports="npm" -o ./`
+ * Copyright jQuery Foundation and other contributors <https://jquery.org/>
+ * Released under MIT license <https://lodash.com/license>
+ * Based on Underscore.js 1.8.3 <http://underscorejs.org/LICENSE>
+ * Copyright Jeremy Ashkenas, DocumentCloud and Investigative Reporters & Editors
+ */
+
+/** Used as the `TypeError` message for "Functions" methods. */
+var FUNC_ERROR_TEXT = 'Expected a function';
+
+/** Used as references for various `Number` constants. */
+var INFINITY = 1 / 0,
+    MAX_INTEGER = 1.7976931348623157e+308,
+    NAN = 0 / 0;
+
+/** `Object#toString` result references. */
+var symbolTag = '[object Symbol]';
+
+/** Used to match leading and trailing whitespace. */
+var reTrim = /^\s+|\s+$/g;
+
+/** Used to detect bad signed hexadecimal string values. */
+var reIsBadHex = /^[-+]0x[0-9a-f]+$/i;
+
+/** Used to detect binary string values. */
+var reIsBinary = /^0b[01]+$/i;
+
+/** Used to detect octal string values. */
+var reIsOctal = /^0o[0-7]+$/i;
+
+/** Built-in method references without a dependency on `root`. */
+var freeParseInt = parseInt;
+
+/** Used for built-in method references. */
+var objectProto = Object.prototype;
+
+/**
+ * Used to resolve the
+ * [`toStringTag`](http://ecma-international.org/ecma-262/7.0/#sec-object.prototype.tostring)
+ * of values.
+ */
+var objectToString = objectProto.toString;
+
+/**
+ * Creates a function that invokes `func`, with the `this` binding and arguments
+ * of the created function, while it's called less than `n` times. Subsequent
+ * calls to the created function return the result of the last `func` invocation.
+ *
+ * @static
+ * @memberOf _
+ * @since 3.0.0
+ * @category Function
+ * @param {number} n The number of calls at which `func` is no longer invoked.
+ * @param {Function} func The function to restrict.
+ * @returns {Function} Returns the new restricted function.
+ * @example
+ *
+ * jQuery(element).on('click', _.before(5, addContactToList));
+ * // => Allows adding up to 4 contacts to the list.
+ */
+function before(n, func) {
+  var result;
+  if (typeof func != 'function') {
+    throw new TypeError(FUNC_ERROR_TEXT);
+  }
+  n = toInteger(n);
+  return function() {
+    if (--n > 0) {
+      result = func.apply(this, arguments);
+    }
+    if (n <= 1) {
+      func = undefined;
+    }
+    return result;
+  };
+}
+
+/**
+ * Creates a function that is restricted to invoking `func` once. Repeat calls
+ * to the function return the value of the first invocation. The `func` is
+ * invoked with the `this` binding and arguments of the created function.
+ *
+ * @static
+ * @memberOf _
+ * @since 0.1.0
+ * @category Function
+ * @param {Function} func The function to restrict.
+ * @returns {Function} Returns the new restricted function.
+ * @example
+ *
+ * var initialize = _.once(createApplication);
+ * initialize();
+ * initialize();
+ * // => `createApplication` is invoked once
+ */
+function once(func) {
+  return before(2, func);
+}
+
+/**
+ * Checks if `value` is the
+ * [language type](http://www.ecma-international.org/ecma-262/7.0/#sec-ecmascript-language-types)
+ * of `Object`. (e.g. arrays, functions, objects, regexes, `new Number(0)`, and `new String('')`)
+ *
+ * @static
+ * @memberOf _
+ * @since 0.1.0
+ * @category Lang
+ * @param {*} value The value to check.
+ * @returns {boolean} Returns `true` if `value` is an object, else `false`.
+ * @example
+ *
+ * _.isObject({});
+ * // => true
+ *
+ * _.isObject([1, 2, 3]);
+ * // => true
+ *
+ * _.isObject(_.noop);
+ * // => true
+ *
+ * _.isObject(null);
+ * // => false
+ */
+function isObject(value) {
+  var type = typeof value;
+  return !!value && (type == 'object' || type == 'function');
+}
+
+/**
+ * Checks if `value` is object-like. A value is object-like if it's not `null`
+ * and has a `typeof` result of "object".
+ *
+ * @static
+ * @memberOf _
+ * @since 4.0.0
+ * @category Lang
+ * @param {*} value The value to check.
+ * @returns {boolean} Returns `true` if `value` is object-like, else `false`.
+ * @example
+ *
+ * _.isObjectLike({});
+ * // => true
+ *
+ * _.isObjectLike([1, 2, 3]);
+ * // => true
+ *
+ * _.isObjectLike(_.noop);
+ * // => false
+ *
+ * _.isObjectLike(null);
+ * // => false
+ */
+function isObjectLike(value) {
+  return !!value && typeof value == 'object';
+}
+
+/**
+ * Checks if `value` is classified as a `Symbol` primitive or object.
+ *
+ * @static
+ * @memberOf _
+ * @since 4.0.0
+ * @category Lang
+ * @param {*} value The value to check.
+ * @returns {boolean} Returns `true` if `value` is a symbol, else `false`.
+ * @example
+ *
+ * _.isSymbol(Symbol.iterator);
+ * // => true
+ *
+ * _.isSymbol('abc');
+ * // => false
+ */
+function isSymbol(value) {
+  return typeof value == 'symbol' ||
+    (isObjectLike(value) && objectToString.call(value) == symbolTag);
+}
+
+/**
+ * Converts `value` to a finite number.
+ *
+ * @static
+ * @memberOf _
+ * @since 4.12.0
+ * @category Lang
+ * @param {*} value The value to convert.
+ * @returns {number} Returns the converted number.
+ * @example
+ *
+ * _.toFinite(3.2);
+ * // => 3.2
+ *
+ * _.toFinite(Number.MIN_VALUE);
+ * // => 5e-324
+ *
+ * _.toFinite(Infinity);
+ * // => 1.7976931348623157e+308
+ *
+ * _.toFinite('3.2');
+ * // => 3.2
+ */
+function toFinite(value) {
+  if (!value) {
+    return value === 0 ? value : 0;
+  }
+  value = toNumber(value);
+  if (value === INFINITY || value === -INFINITY) {
+    var sign = (value < 0 ? -1 : 1);
+    return sign * MAX_INTEGER;
+  }
+  return value === value ? value : 0;
+}
+
+/**
+ * Converts `value` to an integer.
+ *
+ * **Note:** This method is loosely based on
+ * [`ToInteger`](http://www.ecma-international.org/ecma-262/7.0/#sec-tointeger).
+ *
+ * @static
+ * @memberOf _
+ * @since 4.0.0
+ * @category Lang
+ * @param {*} value The value to convert.
+ * @returns {number} Returns the converted integer.
+ * @example
+ *
+ * _.toInteger(3.2);
+ * // => 3
+ *
+ * _.toInteger(Number.MIN_VALUE);
+ * // => 0
+ *
+ * _.toInteger(Infinity);
+ * // => 1.7976931348623157e+308
+ *
+ * _.toInteger('3.2');
+ * // => 3
+ */
+function toInteger(value) {
+  var result = toFinite(value),
+      remainder = result % 1;
+
+  return result === result ? (remainder ? result - remainder : result) : 0;
+}
+
+/**
+ * Converts `value` to a number.
+ *
+ * @static
+ * @memberOf _
+ * @since 4.0.0
+ * @category Lang
+ * @param {*} value The value to process.
+ * @returns {number} Returns the number.
+ * @example
+ *
+ * _.toNumber(3.2);
+ * // => 3.2
+ *
+ * _.toNumber(Number.MIN_VALUE);
+ * // => 5e-324
+ *
+ * _.toNumber(Infinity);
+ * // => Infinity
+ *
+ * _.toNumber('3.2');
+ * // => 3.2
+ */
+function toNumber(value) {
+  if (typeof value == 'number') {
+    return value;
+  }
+  if (isSymbol(value)) {
+    return NAN;
+  }
+  if (isObject(value)) {
+    var other = typeof value.valueOf == 'function' ? value.valueOf() : value;
+    value = isObject(other) ? (other + '') : other;
+  }
+  if (typeof value != 'string') {
+    return value === 0 ? value : +value;
+  }
+  value = value.replace(reTrim, '');
+  var isBinary = reIsBinary.test(value);
+  return (isBinary || reIsOctal.test(value))
+    ? freeParseInt(value.slice(2), isBinary ? 2 : 8)
+    : (reIsBadHex.test(value) ? NAN : +value);
+}
+
+module.exports = once;
+
+
+/***/ }),
+
+/***/ 7426:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+/*!
+ * mime-db
+ * Copyright(c) 2014 Jonathan Ong
+ * MIT Licensed
+ */
+
+/**
+ * Module exports.
+ */
+
+module.exports = __nccwpck_require__(3765)
+
+
+/***/ }),
+
+/***/ 3583:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+/*!
+ * mime-types
+ * Copyright(c) 2014 Jonathan Ong
+ * Copyright(c) 2015 Douglas Christopher Wilson
+ * MIT Licensed
+ */
+
+
+
+/**
+ * Module dependencies.
+ * @private
+ */
+
+var db = __nccwpck_require__(7426)
+var extname = (__nccwpck_require__(1017).extname)
+
+/**
+ * Module variables.
+ * @private
+ */
+
+var EXTRACT_TYPE_REGEXP = /^\s*([^;\s]*)(?:;|\s|$)/
+var TEXT_TYPE_REGEXP = /^text\//i
+
+/**
+ * Module exports.
+ * @public
+ */
+
+exports.charset = charset
+exports.charsets = { lookup: charset }
+exports.contentType = contentType
+exports.extension = extension
+exports.extensions = Object.create(null)
+exports.lookup = lookup
+exports.types = Object.create(null)
+
+// Populate the extensions/types maps
+populateMaps(exports.extensions, exports.types)
+
+/**
+ * Get the default charset for a MIME type.
+ *
+ * @param {string} type
+ * @return {boolean|string}
+ */
+
+function charset (type) {
+  if (!type || typeof type !== 'string') {
+    return false
+  }
+
+  // TODO: use media-typer
+  var match = EXTRACT_TYPE_REGEXP.exec(type)
+  var mime = match && db[match[1].toLowerCase()]
+
+  if (mime && mime.charset) {
+    return mime.charset
+  }
+
+  // default text/* to utf-8
+  if (match && TEXT_TYPE_REGEXP.test(match[1])) {
+    return 'UTF-8'
+  }
+
+  return false
+}
+
+/**
+ * Create a full Content-Type header given a MIME type or extension.
+ *
+ * @param {string} str
+ * @return {boolean|string}
+ */
+
+function contentType (str) {
+  // TODO: should this even be in this module?
+  if (!str || typeof str !== 'string') {
+    return false
+  }
+
+  var mime = str.indexOf('/') === -1
+    ? exports.lookup(str)
+    : str
+
+  if (!mime) {
+    return false
+  }
+
+  // TODO: use content-type or other module
+  if (mime.indexOf('charset') === -1) {
+    var charset = exports.charset(mime)
+    if (charset) mime += '; charset=' + charset.toLowerCase()
+  }
+
+  return mime
+}
+
+/**
+ * Get the default extension for a MIME type.
+ *
+ * @param {string} type
+ * @return {boolean|string}
+ */
+
+function extension (type) {
+  if (!type || typeof type !== 'string') {
+    return false
+  }
+
+  // TODO: use media-typer
+  var match = EXTRACT_TYPE_REGEXP.exec(type)
+
+  // get extensions
+  var exts = match && exports.extensions[match[1].toLowerCase()]
+
+  if (!exts || !exts.length) {
+    return false
+  }
+
+  return exts[0]
+}
+
+/**
+ * Lookup the MIME type for a file path/extension.
+ *
+ * @param {string} path
+ * @return {boolean|string}
+ */
+
+function lookup (path) {
+  if (!path || typeof path !== 'string') {
+    return false
+  }
+
+  // get the extension ("ext" or ".ext" or full path)
+  var extension = extname('x.' + path)
+    .toLowerCase()
+    .substr(1)
+
+  if (!extension) {
+    return false
+  }
+
+  return exports.types[extension] || false
+}
+
+/**
+ * Populate the extensions and types maps.
+ * @private
+ */
+
+function populateMaps (extensions, types) {
+  // source preference (least -> most)
+  var preference = ['nginx', 'apache', undefined, 'iana']
+
+  Object.keys(db).forEach(function forEachMimeType (type) {
+    var mime = db[type]
+    var exts = mime.extensions
+
+    if (!exts || !exts.length) {
+      return
+    }
+
+    // mime -> extensions
+    extensions[type] = exts
+
+    // extension -> mime
+    for (var i = 0; i < exts.length; i++) {
+      var extension = exts[i]
+
+      if (types[extension]) {
+        var from = preference.indexOf(db[types[extension]].source)
+        var to = preference.indexOf(mime.source)
+
+        if (types[extension] !== 'application/octet-stream' &&
+          (from > to || (from === to && types[extension].substr(0, 12) === 'application/'))) {
+          // skip the remapping
+          continue
+        }
+      }
+
+      // set the extension -> mime
+      types[extension] = type
+    }
   })
 }
 
 
 /***/ }),
 
-/***/ 1531:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-
-
-const EventEmitter = __nccwpck_require__(2361);
-const JSONB = __nccwpck_require__(2820);
-
-const loadStore = options => {
-	const adapters = {
-		redis: '@keyv/redis',
-		rediss: '@keyv/redis',
-		mongodb: '@keyv/mongo',
-		mongo: '@keyv/mongo',
-		sqlite: '@keyv/sqlite',
-		postgresql: '@keyv/postgres',
-		postgres: '@keyv/postgres',
-		mysql: '@keyv/mysql',
-		etcd: '@keyv/etcd',
-		offline: '@keyv/offline',
-		tiered: '@keyv/tiered',
-	};
-	if (options.adapter || options.uri) {
-		const adapter = options.adapter || /^[^:+]*/.exec(options.uri)[0];
-		return new (require(adapters[adapter]))(options);
-	}
-
-	return new Map();
-};
-
-const iterableAdapters = [
-	'sqlite',
-	'postgres',
-	'mysql',
-	'mongo',
-	'redis',
-	'tiered',
-];
-
-class Keyv extends EventEmitter {
-	constructor(uri, {emitErrors = true, ...options} = {}) {
-		super();
-		this.opts = {
-			namespace: 'keyv',
-			serialize: JSONB.stringify,
-			deserialize: JSONB.parse,
-			...((typeof uri === 'string') ? {uri} : uri),
-			...options,
-		};
-
-		if (!this.opts.store) {
-			const adapterOptions = {...this.opts};
-			this.opts.store = loadStore(adapterOptions);
-		}
-
-		if (this.opts.compression) {
-			const compression = this.opts.compression;
-			const {serialize, deserialize} = compression.opts;
-			this.opts.serialize = serialize;
-			this.opts.deserialize = deserialize;
-		}
-
-		if (typeof this.opts.store.on === 'function' && emitErrors) {
-			this.opts.store.on('error', error => this.emit('error', error));
-		}
-
-		this.opts.store.namespace = this.opts.namespace;
-
-		const generateIterator = iterator => async function * () {
-			for await (const [key, raw] of typeof iterator === 'function'
-				? iterator(this.opts.store.namespace)
-				: iterator) {
-				const data = this.opts.deserialize(raw);
-				if (this.opts.store.namespace && !key.includes(this.opts.store.namespace)) {
-					continue;
-				}
-
-				if (typeof data.expires === 'number' && Date.now() > data.expires) {
-					this.delete(key);
-					continue;
-				}
-
-				yield [this._getKeyUnprefix(key), data.value];
-			}
-		};
-
-		// Attach iterators
-		if (typeof this.opts.store[Symbol.iterator] === 'function' && this.opts.store instanceof Map) {
-			this.iterator = generateIterator(this.opts.store);
-		} else if (typeof this.opts.store.iterator === 'function' && this.opts.store.opts
-			&& this._checkIterableAdaptar()) {
-			this.iterator = generateIterator(this.opts.store.iterator.bind(this.opts.store));
-		}
-	}
-
-	_checkIterableAdaptar() {
-		return iterableAdapters.includes(this.opts.store.opts.dialect)
-			|| iterableAdapters.findIndex(element => this.opts.store.opts.url.includes(element)) >= 0;
-	}
-
-	_getKeyPrefix(key) {
-		return `${this.opts.namespace}:${key}`;
-	}
-
-	_getKeyPrefixArray(keys) {
-		return keys.map(key => `${this.opts.namespace}:${key}`);
-	}
-
-	_getKeyUnprefix(key) {
-		return key
-			.split(':')
-			.splice(1)
-			.join(':');
-	}
-
-	get(key, options) {
-		const {store} = this.opts;
-		const isArray = Array.isArray(key);
-		const keyPrefixed = isArray ? this._getKeyPrefixArray(key) : this._getKeyPrefix(key);
-		if (isArray && store.getMany === undefined) {
-			const promises = [];
-			for (const key of keyPrefixed) {
-				promises.push(Promise.resolve()
-					.then(() => store.get(key))
-					.then(data => (typeof data === 'string') ? this.opts.deserialize(data) : data)
-					.then(data => {
-						if (data === undefined || data === null) {
-							return undefined;
-						}
-
-						if (typeof data.expires === 'number' && Date.now() > data.expires) {
-							return this.delete(key).then(() => undefined);
-						}
-
-						return (options && options.raw) ? data : data.value;
-					}),
-				);
-			}
-
-			return Promise.allSettled(promises)
-				.then(values => {
-					const data = [];
-					for (const value of values) {
-						data.push(value.value);
-					}
-
-					return data;
-				});
-		}
-
-		return Promise.resolve()
-			.then(() => isArray ? store.getMany(keyPrefixed) : store.get(keyPrefixed))
-			.then(data => (typeof data === 'string') ? this.opts.deserialize(data) : data)
-			.then(data => {
-				if (data === undefined || data === null) {
-					return undefined;
-				}
-
-				if (isArray) {
-					const result = [];
-
-					for (let row of data) {
-						if ((typeof row === 'string')) {
-							row = this.opts.deserialize(row);
-						}
-
-						if (row === undefined || row === null) {
-							result.push(undefined);
-							continue;
-						}
-
-						if (typeof row.expires === 'number' && Date.now() > row.expires) {
-							this.delete(key).then(() => undefined);
-							result.push(undefined);
-						} else {
-							result.push((options && options.raw) ? row : row.value);
-						}
-					}
-
-					return result;
-				}
-
-				if (typeof data.expires === 'number' && Date.now() > data.expires) {
-					return this.delete(key).then(() => undefined);
-				}
-
-				return (options && options.raw) ? data : data.value;
-			});
-	}
-
-	set(key, value, ttl) {
-		const keyPrefixed = this._getKeyPrefix(key);
-		if (typeof ttl === 'undefined') {
-			ttl = this.opts.ttl;
-		}
-
-		if (ttl === 0) {
-			ttl = undefined;
-		}
-
-		const {store} = this.opts;
-
-		return Promise.resolve()
-			.then(() => {
-				const expires = (typeof ttl === 'number') ? (Date.now() + ttl) : null;
-				if (typeof value === 'symbol') {
-					this.emit('error', 'symbol cannot be serialized');
-				}
-
-				value = {value, expires};
-				return this.opts.serialize(value);
-			})
-			.then(value => store.set(keyPrefixed, value, ttl))
-			.then(() => true);
-	}
-
-	delete(key) {
-		const {store} = this.opts;
-		if (Array.isArray(key)) {
-			const keyPrefixed = this._getKeyPrefixArray(key);
-			if (store.deleteMany === undefined) {
-				const promises = [];
-				for (const key of keyPrefixed) {
-					promises.push(store.delete(key));
-				}
-
-				return Promise.allSettled(promises)
-					.then(values => values.every(x => x.value === true));
-			}
-
-			return Promise.resolve()
-				.then(() => store.deleteMany(keyPrefixed));
-		}
-
-		const keyPrefixed = this._getKeyPrefix(key);
-		return Promise.resolve()
-			.then(() => store.delete(keyPrefixed));
-	}
-
-	clear() {
-		const {store} = this.opts;
-		return Promise.resolve()
-			.then(() => store.clear());
-	}
-
-	has(key) {
-		const keyPrefixed = this._getKeyPrefix(key);
-		const {store} = this.opts;
-		return Promise.resolve()
-			.then(async () => {
-				if (typeof store.has === 'function') {
-					return store.has(keyPrefixed);
-				}
-
-				const value = await store.get(keyPrefixed);
-				return value !== undefined;
-			});
-	}
-
-	disconnect() {
-		const {store} = this.opts;
-		if (typeof store.disconnect === 'function') {
-			return store.disconnect();
-		}
-	}
-}
-
-module.exports = Keyv;
-
-
-/***/ }),
-
-/***/ 9273:
+/***/ 900:
 /***/ ((module) => {
 
+/**
+ * Helpers.
+ */
 
+var s = 1000;
+var m = s * 60;
+var h = m * 60;
+var d = h * 24;
+var w = d * 7;
+var y = d * 365.25;
 
-class QuickLRU {
-	constructor(options = {}) {
-		if (!(options.maxSize && options.maxSize > 0)) {
-			throw new TypeError('`maxSize` must be a number greater than 0');
-		}
+/**
+ * Parse or format the given `val`.
+ *
+ * Options:
+ *
+ *  - `long` verbose formatting [false]
+ *
+ * @param {String|Number} val
+ * @param {Object} [options]
+ * @throws {Error} throw an error if val is not a non-empty string or a number
+ * @return {String|Number}
+ * @api public
+ */
 
-		this.maxSize = options.maxSize;
-		this.onEviction = options.onEviction;
-		this.cache = new Map();
-		this.oldCache = new Map();
-		this._size = 0;
-	}
+module.exports = function(val, options) {
+  options = options || {};
+  var type = typeof val;
+  if (type === 'string' && val.length > 0) {
+    return parse(val);
+  } else if (type === 'number' && isFinite(val)) {
+    return options.long ? fmtLong(val) : fmtShort(val);
+  }
+  throw new Error(
+    'val is not a non-empty string or a valid number. val=' +
+      JSON.stringify(val)
+  );
+};
 
-	_set(key, value) {
-		this.cache.set(key, value);
-		this._size++;
+/**
+ * Parse the given `str` and return milliseconds.
+ *
+ * @param {String} str
+ * @return {Number}
+ * @api private
+ */
 
-		if (this._size >= this.maxSize) {
-			this._size = 0;
-
-			if (typeof this.onEviction === 'function') {
-				for (const [key, value] of this.oldCache.entries()) {
-					this.onEviction(key, value);
-				}
-			}
-
-			this.oldCache = this.cache;
-			this.cache = new Map();
-		}
-	}
-
-	get(key) {
-		if (this.cache.has(key)) {
-			return this.cache.get(key);
-		}
-
-		if (this.oldCache.has(key)) {
-			const value = this.oldCache.get(key);
-			this.oldCache.delete(key);
-			this._set(key, value);
-			return value;
-		}
-	}
-
-	set(key, value) {
-		if (this.cache.has(key)) {
-			this.cache.set(key, value);
-		} else {
-			this._set(key, value);
-		}
-
-		return this;
-	}
-
-	has(key) {
-		return this.cache.has(key) || this.oldCache.has(key);
-	}
-
-	peek(key) {
-		if (this.cache.has(key)) {
-			return this.cache.get(key);
-		}
-
-		if (this.oldCache.has(key)) {
-			return this.oldCache.get(key);
-		}
-	}
-
-	delete(key) {
-		const deleted = this.cache.delete(key);
-		if (deleted) {
-			this._size--;
-		}
-
-		return this.oldCache.delete(key) || deleted;
-	}
-
-	clear() {
-		this.cache.clear();
-		this.oldCache.clear();
-		this._size = 0;
-	}
-
-	* keys() {
-		for (const [key] of this) {
-			yield key;
-		}
-	}
-
-	* values() {
-		for (const [, value] of this) {
-			yield value;
-		}
-	}
-
-	* [Symbol.iterator]() {
-		for (const item of this.cache) {
-			yield item;
-		}
-
-		for (const item of this.oldCache) {
-			const [key] = item;
-			if (!this.cache.has(key)) {
-				yield item;
-			}
-		}
-	}
-
-	get size() {
-		let oldCacheSize = 0;
-		for (const key of this.oldCache.keys()) {
-			if (!this.cache.has(key)) {
-				oldCacheSize++;
-			}
-		}
-
-		return Math.min(this._size + oldCacheSize, this.maxSize);
-	}
+function parse(str) {
+  str = String(str);
+  if (str.length > 100) {
+    return;
+  }
+  var match = /^(-?(?:\d+)?\.?\d+) *(milliseconds?|msecs?|ms|seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h|days?|d|weeks?|w|years?|yrs?|y)?$/i.exec(
+    str
+  );
+  if (!match) {
+    return;
+  }
+  var n = parseFloat(match[1]);
+  var type = (match[2] || 'ms').toLowerCase();
+  switch (type) {
+    case 'years':
+    case 'year':
+    case 'yrs':
+    case 'yr':
+    case 'y':
+      return n * y;
+    case 'weeks':
+    case 'week':
+    case 'w':
+      return n * w;
+    case 'days':
+    case 'day':
+    case 'd':
+      return n * d;
+    case 'hours':
+    case 'hour':
+    case 'hrs':
+    case 'hr':
+    case 'h':
+      return n * h;
+    case 'minutes':
+    case 'minute':
+    case 'mins':
+    case 'min':
+    case 'm':
+      return n * m;
+    case 'seconds':
+    case 'second':
+    case 'secs':
+    case 'sec':
+    case 's':
+      return n * s;
+    case 'milliseconds':
+    case 'millisecond':
+    case 'msecs':
+    case 'msec':
+    case 'ms':
+      return n;
+    default:
+      return undefined;
+  }
 }
 
-module.exports = QuickLRU;
+/**
+ * Short format for `ms`.
+ *
+ * @param {Number} ms
+ * @return {String}
+ * @api private
+ */
+
+function fmtShort(ms) {
+  var msAbs = Math.abs(ms);
+  if (msAbs >= d) {
+    return Math.round(ms / d) + 'd';
+  }
+  if (msAbs >= h) {
+    return Math.round(ms / h) + 'h';
+  }
+  if (msAbs >= m) {
+    return Math.round(ms / m) + 'm';
+  }
+  if (msAbs >= s) {
+    return Math.round(ms / s) + 's';
+  }
+  return ms + 'ms';
+}
+
+/**
+ * Long format for `ms`.
+ *
+ * @param {Number} ms
+ * @return {String}
+ * @api private
+ */
+
+function fmtLong(ms) {
+  var msAbs = Math.abs(ms);
+  if (msAbs >= d) {
+    return plural(ms, msAbs, d, 'day');
+  }
+  if (msAbs >= h) {
+    return plural(ms, msAbs, h, 'hour');
+  }
+  if (msAbs >= m) {
+    return plural(ms, msAbs, m, 'minute');
+  }
+  if (msAbs >= s) {
+    return plural(ms, msAbs, s, 'second');
+  }
+  return ms + ' ms';
+}
+
+/**
+ * Pluralization helper.
+ */
+
+function plural(ms, msAbs, n, name) {
+  var isPlural = msAbs >= n * 1.5;
+  return Math.round(ms / n) + ' ' + name + (isPlural ? 's' : '');
+}
 
 
 /***/ }),
 
-/***/ 6624:
+/***/ 7760:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
+/*! node-domexception. MIT License. Jimmy Wärting <https://jimmy.warting.se/opensource> */
 
-const tls = __nccwpck_require__(4404);
+if (!globalThis.DOMException) {
+  try {
+    const { MessageChannel } = __nccwpck_require__(1267),
+    port = new MessageChannel().port1,
+    ab = new ArrayBuffer()
+    port.postMessage(ab, [ab, ab])
+  } catch (err) {
+    err.constructor.name === 'DOMException' && (
+      globalThis.DOMException = err.constructor
+    )
+  }
+}
 
-module.exports = (options = {}, connect = tls.connect) => new Promise((resolve, reject) => {
-	let timeout = false;
+module.exports = globalThis.DOMException
 
-	let socket;
 
-	const callback = async () => {
-		await socketPromise;
+/***/ }),
 
-		socket.off('timeout', onTimeout);
-		socket.off('error', reject);
+/***/ 1867:
+/***/ ((module, exports, __nccwpck_require__) => {
 
-		if (options.resolveSocket) {
-			resolve({alpnProtocol: socket.alpnProtocol, socket, timeout});
+/* eslint-disable node/no-deprecated-api */
+var buffer = __nccwpck_require__(4300)
+var Buffer = buffer.Buffer
 
-			if (timeout) {
-				await Promise.resolve();
-				socket.emit('timeout');
-			}
-		} else {
-			socket.destroy();
-			resolve({alpnProtocol: socket.alpnProtocol, timeout});
-		}
-	};
+// alternative to using Object.keys for old browsers
+function copyProps (src, dst) {
+  for (var key in src) {
+    dst[key] = src[key]
+  }
+}
+if (Buffer.from && Buffer.alloc && Buffer.allocUnsafe && Buffer.allocUnsafeSlow) {
+  module.exports = buffer
+} else {
+  // Copy properties from require('buffer')
+  copyProps(buffer, exports)
+  exports.Buffer = SafeBuffer
+}
 
-	const onTimeout = async () => {
-		timeout = true;
-		callback();
-	};
+function SafeBuffer (arg, encodingOrOffset, length) {
+  return Buffer(arg, encodingOrOffset, length)
+}
 
-	const socketPromise = (async () => {
-		try {
-			socket = await connect(options, callback);
+// Copy static methods from Buffer
+copyProps(Buffer, SafeBuffer)
 
-			socket.on('error', reject);
-			socket.once('timeout', onTimeout);
-		} catch (error) {
-			reject(error);
-		}
-	})();
-});
+SafeBuffer.from = function (arg, encodingOrOffset, length) {
+  if (typeof arg === 'number') {
+    throw new TypeError('Argument must not be a number')
+  }
+  return Buffer(arg, encodingOrOffset, length)
+}
+
+SafeBuffer.alloc = function (size, fill, encoding) {
+  if (typeof size !== 'number') {
+    throw new TypeError('Argument must be a number')
+  }
+  var buf = Buffer(size)
+  if (fill !== undefined) {
+    if (typeof encoding === 'string') {
+      buf.fill(fill, encoding)
+    } else {
+      buf.fill(fill)
+    }
+  } else {
+    buf.fill(0)
+  }
+  return buf
+}
+
+SafeBuffer.allocUnsafe = function (size) {
+  if (typeof size !== 'number') {
+    throw new TypeError('Argument must be a number')
+  }
+  return Buffer(size)
+}
+
+SafeBuffer.allocUnsafeSlow = function (size) {
+  if (typeof size !== 'number') {
+    throw new TypeError('Argument must be a number')
+  }
+  return buffer.SlowBuffer(size)
+}
 
 
 /***/ }),
@@ -6578,6 +9095,4225 @@ exports["default"] = _default;
 
 /***/ }),
 
+/***/ 1452:
+/***/ (function(__unused_webpack_module, exports) {
+
+/**
+ * web-streams-polyfill v3.2.1
+ */
+(function (global, factory) {
+     true ? factory(exports) :
+    0;
+}(this, (function (exports) { 'use strict';
+
+    /// <reference lib="es2015.symbol" />
+    const SymbolPolyfill = typeof Symbol === 'function' && typeof Symbol.iterator === 'symbol' ?
+        Symbol :
+        description => `Symbol(${description})`;
+
+    /// <reference lib="dom" />
+    function noop() {
+        return undefined;
+    }
+    function getGlobals() {
+        if (typeof self !== 'undefined') {
+            return self;
+        }
+        else if (typeof window !== 'undefined') {
+            return window;
+        }
+        else if (typeof global !== 'undefined') {
+            return global;
+        }
+        return undefined;
+    }
+    const globals = getGlobals();
+
+    function typeIsObject(x) {
+        return (typeof x === 'object' && x !== null) || typeof x === 'function';
+    }
+    const rethrowAssertionErrorRejection = noop;
+
+    const originalPromise = Promise;
+    const originalPromiseThen = Promise.prototype.then;
+    const originalPromiseResolve = Promise.resolve.bind(originalPromise);
+    const originalPromiseReject = Promise.reject.bind(originalPromise);
+    function newPromise(executor) {
+        return new originalPromise(executor);
+    }
+    function promiseResolvedWith(value) {
+        return originalPromiseResolve(value);
+    }
+    function promiseRejectedWith(reason) {
+        return originalPromiseReject(reason);
+    }
+    function PerformPromiseThen(promise, onFulfilled, onRejected) {
+        // There doesn't appear to be any way to correctly emulate the behaviour from JavaScript, so this is just an
+        // approximation.
+        return originalPromiseThen.call(promise, onFulfilled, onRejected);
+    }
+    function uponPromise(promise, onFulfilled, onRejected) {
+        PerformPromiseThen(PerformPromiseThen(promise, onFulfilled, onRejected), undefined, rethrowAssertionErrorRejection);
+    }
+    function uponFulfillment(promise, onFulfilled) {
+        uponPromise(promise, onFulfilled);
+    }
+    function uponRejection(promise, onRejected) {
+        uponPromise(promise, undefined, onRejected);
+    }
+    function transformPromiseWith(promise, fulfillmentHandler, rejectionHandler) {
+        return PerformPromiseThen(promise, fulfillmentHandler, rejectionHandler);
+    }
+    function setPromiseIsHandledToTrue(promise) {
+        PerformPromiseThen(promise, undefined, rethrowAssertionErrorRejection);
+    }
+    const queueMicrotask = (() => {
+        const globalQueueMicrotask = globals && globals.queueMicrotask;
+        if (typeof globalQueueMicrotask === 'function') {
+            return globalQueueMicrotask;
+        }
+        const resolvedPromise = promiseResolvedWith(undefined);
+        return (fn) => PerformPromiseThen(resolvedPromise, fn);
+    })();
+    function reflectCall(F, V, args) {
+        if (typeof F !== 'function') {
+            throw new TypeError('Argument is not a function');
+        }
+        return Function.prototype.apply.call(F, V, args);
+    }
+    function promiseCall(F, V, args) {
+        try {
+            return promiseResolvedWith(reflectCall(F, V, args));
+        }
+        catch (value) {
+            return promiseRejectedWith(value);
+        }
+    }
+
+    // Original from Chromium
+    // https://chromium.googlesource.com/chromium/src/+/0aee4434a4dba42a42abaea9bfbc0cd196a63bc1/third_party/blink/renderer/core/streams/SimpleQueue.js
+    const QUEUE_MAX_ARRAY_SIZE = 16384;
+    /**
+     * Simple queue structure.
+     *
+     * Avoids scalability issues with using a packed array directly by using
+     * multiple arrays in a linked list and keeping the array size bounded.
+     */
+    class SimpleQueue {
+        constructor() {
+            this._cursor = 0;
+            this._size = 0;
+            // _front and _back are always defined.
+            this._front = {
+                _elements: [],
+                _next: undefined
+            };
+            this._back = this._front;
+            // The cursor is used to avoid calling Array.shift().
+            // It contains the index of the front element of the array inside the
+            // front-most node. It is always in the range [0, QUEUE_MAX_ARRAY_SIZE).
+            this._cursor = 0;
+            // When there is only one node, size === elements.length - cursor.
+            this._size = 0;
+        }
+        get length() {
+            return this._size;
+        }
+        // For exception safety, this method is structured in order:
+        // 1. Read state
+        // 2. Calculate required state mutations
+        // 3. Perform state mutations
+        push(element) {
+            const oldBack = this._back;
+            let newBack = oldBack;
+            if (oldBack._elements.length === QUEUE_MAX_ARRAY_SIZE - 1) {
+                newBack = {
+                    _elements: [],
+                    _next: undefined
+                };
+            }
+            // push() is the mutation most likely to throw an exception, so it
+            // goes first.
+            oldBack._elements.push(element);
+            if (newBack !== oldBack) {
+                this._back = newBack;
+                oldBack._next = newBack;
+            }
+            ++this._size;
+        }
+        // Like push(), shift() follows the read -> calculate -> mutate pattern for
+        // exception safety.
+        shift() { // must not be called on an empty queue
+            const oldFront = this._front;
+            let newFront = oldFront;
+            const oldCursor = this._cursor;
+            let newCursor = oldCursor + 1;
+            const elements = oldFront._elements;
+            const element = elements[oldCursor];
+            if (newCursor === QUEUE_MAX_ARRAY_SIZE) {
+                newFront = oldFront._next;
+                newCursor = 0;
+            }
+            // No mutations before this point.
+            --this._size;
+            this._cursor = newCursor;
+            if (oldFront !== newFront) {
+                this._front = newFront;
+            }
+            // Permit shifted element to be garbage collected.
+            elements[oldCursor] = undefined;
+            return element;
+        }
+        // The tricky thing about forEach() is that it can be called
+        // re-entrantly. The queue may be mutated inside the callback. It is easy to
+        // see that push() within the callback has no negative effects since the end
+        // of the queue is checked for on every iteration. If shift() is called
+        // repeatedly within the callback then the next iteration may return an
+        // element that has been removed. In this case the callback will be called
+        // with undefined values until we either "catch up" with elements that still
+        // exist or reach the back of the queue.
+        forEach(callback) {
+            let i = this._cursor;
+            let node = this._front;
+            let elements = node._elements;
+            while (i !== elements.length || node._next !== undefined) {
+                if (i === elements.length) {
+                    node = node._next;
+                    elements = node._elements;
+                    i = 0;
+                    if (elements.length === 0) {
+                        break;
+                    }
+                }
+                callback(elements[i]);
+                ++i;
+            }
+        }
+        // Return the element that would be returned if shift() was called now,
+        // without modifying the queue.
+        peek() { // must not be called on an empty queue
+            const front = this._front;
+            const cursor = this._cursor;
+            return front._elements[cursor];
+        }
+    }
+
+    function ReadableStreamReaderGenericInitialize(reader, stream) {
+        reader._ownerReadableStream = stream;
+        stream._reader = reader;
+        if (stream._state === 'readable') {
+            defaultReaderClosedPromiseInitialize(reader);
+        }
+        else if (stream._state === 'closed') {
+            defaultReaderClosedPromiseInitializeAsResolved(reader);
+        }
+        else {
+            defaultReaderClosedPromiseInitializeAsRejected(reader, stream._storedError);
+        }
+    }
+    // A client of ReadableStreamDefaultReader and ReadableStreamBYOBReader may use these functions directly to bypass state
+    // check.
+    function ReadableStreamReaderGenericCancel(reader, reason) {
+        const stream = reader._ownerReadableStream;
+        return ReadableStreamCancel(stream, reason);
+    }
+    function ReadableStreamReaderGenericRelease(reader) {
+        if (reader._ownerReadableStream._state === 'readable') {
+            defaultReaderClosedPromiseReject(reader, new TypeError(`Reader was released and can no longer be used to monitor the stream's closedness`));
+        }
+        else {
+            defaultReaderClosedPromiseResetToRejected(reader, new TypeError(`Reader was released and can no longer be used to monitor the stream's closedness`));
+        }
+        reader._ownerReadableStream._reader = undefined;
+        reader._ownerReadableStream = undefined;
+    }
+    // Helper functions for the readers.
+    function readerLockException(name) {
+        return new TypeError('Cannot ' + name + ' a stream using a released reader');
+    }
+    // Helper functions for the ReadableStreamDefaultReader.
+    function defaultReaderClosedPromiseInitialize(reader) {
+        reader._closedPromise = newPromise((resolve, reject) => {
+            reader._closedPromise_resolve = resolve;
+            reader._closedPromise_reject = reject;
+        });
+    }
+    function defaultReaderClosedPromiseInitializeAsRejected(reader, reason) {
+        defaultReaderClosedPromiseInitialize(reader);
+        defaultReaderClosedPromiseReject(reader, reason);
+    }
+    function defaultReaderClosedPromiseInitializeAsResolved(reader) {
+        defaultReaderClosedPromiseInitialize(reader);
+        defaultReaderClosedPromiseResolve(reader);
+    }
+    function defaultReaderClosedPromiseReject(reader, reason) {
+        if (reader._closedPromise_reject === undefined) {
+            return;
+        }
+        setPromiseIsHandledToTrue(reader._closedPromise);
+        reader._closedPromise_reject(reason);
+        reader._closedPromise_resolve = undefined;
+        reader._closedPromise_reject = undefined;
+    }
+    function defaultReaderClosedPromiseResetToRejected(reader, reason) {
+        defaultReaderClosedPromiseInitializeAsRejected(reader, reason);
+    }
+    function defaultReaderClosedPromiseResolve(reader) {
+        if (reader._closedPromise_resolve === undefined) {
+            return;
+        }
+        reader._closedPromise_resolve(undefined);
+        reader._closedPromise_resolve = undefined;
+        reader._closedPromise_reject = undefined;
+    }
+
+    const AbortSteps = SymbolPolyfill('[[AbortSteps]]');
+    const ErrorSteps = SymbolPolyfill('[[ErrorSteps]]');
+    const CancelSteps = SymbolPolyfill('[[CancelSteps]]');
+    const PullSteps = SymbolPolyfill('[[PullSteps]]');
+
+    /// <reference lib="es2015.core" />
+    // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Number/isFinite#Polyfill
+    const NumberIsFinite = Number.isFinite || function (x) {
+        return typeof x === 'number' && isFinite(x);
+    };
+
+    /// <reference lib="es2015.core" />
+    // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math/trunc#Polyfill
+    const MathTrunc = Math.trunc || function (v) {
+        return v < 0 ? Math.ceil(v) : Math.floor(v);
+    };
+
+    // https://heycam.github.io/webidl/#idl-dictionaries
+    function isDictionary(x) {
+        return typeof x === 'object' || typeof x === 'function';
+    }
+    function assertDictionary(obj, context) {
+        if (obj !== undefined && !isDictionary(obj)) {
+            throw new TypeError(`${context} is not an object.`);
+        }
+    }
+    // https://heycam.github.io/webidl/#idl-callback-functions
+    function assertFunction(x, context) {
+        if (typeof x !== 'function') {
+            throw new TypeError(`${context} is not a function.`);
+        }
+    }
+    // https://heycam.github.io/webidl/#idl-object
+    function isObject(x) {
+        return (typeof x === 'object' && x !== null) || typeof x === 'function';
+    }
+    function assertObject(x, context) {
+        if (!isObject(x)) {
+            throw new TypeError(`${context} is not an object.`);
+        }
+    }
+    function assertRequiredArgument(x, position, context) {
+        if (x === undefined) {
+            throw new TypeError(`Parameter ${position} is required in '${context}'.`);
+        }
+    }
+    function assertRequiredField(x, field, context) {
+        if (x === undefined) {
+            throw new TypeError(`${field} is required in '${context}'.`);
+        }
+    }
+    // https://heycam.github.io/webidl/#idl-unrestricted-double
+    function convertUnrestrictedDouble(value) {
+        return Number(value);
+    }
+    function censorNegativeZero(x) {
+        return x === 0 ? 0 : x;
+    }
+    function integerPart(x) {
+        return censorNegativeZero(MathTrunc(x));
+    }
+    // https://heycam.github.io/webidl/#idl-unsigned-long-long
+    function convertUnsignedLongLongWithEnforceRange(value, context) {
+        const lowerBound = 0;
+        const upperBound = Number.MAX_SAFE_INTEGER;
+        let x = Number(value);
+        x = censorNegativeZero(x);
+        if (!NumberIsFinite(x)) {
+            throw new TypeError(`${context} is not a finite number`);
+        }
+        x = integerPart(x);
+        if (x < lowerBound || x > upperBound) {
+            throw new TypeError(`${context} is outside the accepted range of ${lowerBound} to ${upperBound}, inclusive`);
+        }
+        if (!NumberIsFinite(x) || x === 0) {
+            return 0;
+        }
+        // TODO Use BigInt if supported?
+        // let xBigInt = BigInt(integerPart(x));
+        // xBigInt = BigInt.asUintN(64, xBigInt);
+        // return Number(xBigInt);
+        return x;
+    }
+
+    function assertReadableStream(x, context) {
+        if (!IsReadableStream(x)) {
+            throw new TypeError(`${context} is not a ReadableStream.`);
+        }
+    }
+
+    // Abstract operations for the ReadableStream.
+    function AcquireReadableStreamDefaultReader(stream) {
+        return new ReadableStreamDefaultReader(stream);
+    }
+    // ReadableStream API exposed for controllers.
+    function ReadableStreamAddReadRequest(stream, readRequest) {
+        stream._reader._readRequests.push(readRequest);
+    }
+    function ReadableStreamFulfillReadRequest(stream, chunk, done) {
+        const reader = stream._reader;
+        const readRequest = reader._readRequests.shift();
+        if (done) {
+            readRequest._closeSteps();
+        }
+        else {
+            readRequest._chunkSteps(chunk);
+        }
+    }
+    function ReadableStreamGetNumReadRequests(stream) {
+        return stream._reader._readRequests.length;
+    }
+    function ReadableStreamHasDefaultReader(stream) {
+        const reader = stream._reader;
+        if (reader === undefined) {
+            return false;
+        }
+        if (!IsReadableStreamDefaultReader(reader)) {
+            return false;
+        }
+        return true;
+    }
+    /**
+     * A default reader vended by a {@link ReadableStream}.
+     *
+     * @public
+     */
+    class ReadableStreamDefaultReader {
+        constructor(stream) {
+            assertRequiredArgument(stream, 1, 'ReadableStreamDefaultReader');
+            assertReadableStream(stream, 'First parameter');
+            if (IsReadableStreamLocked(stream)) {
+                throw new TypeError('This stream has already been locked for exclusive reading by another reader');
+            }
+            ReadableStreamReaderGenericInitialize(this, stream);
+            this._readRequests = new SimpleQueue();
+        }
+        /**
+         * Returns a promise that will be fulfilled when the stream becomes closed,
+         * or rejected if the stream ever errors or the reader's lock is released before the stream finishes closing.
+         */
+        get closed() {
+            if (!IsReadableStreamDefaultReader(this)) {
+                return promiseRejectedWith(defaultReaderBrandCheckException('closed'));
+            }
+            return this._closedPromise;
+        }
+        /**
+         * If the reader is active, behaves the same as {@link ReadableStream.cancel | stream.cancel(reason)}.
+         */
+        cancel(reason = undefined) {
+            if (!IsReadableStreamDefaultReader(this)) {
+                return promiseRejectedWith(defaultReaderBrandCheckException('cancel'));
+            }
+            if (this._ownerReadableStream === undefined) {
+                return promiseRejectedWith(readerLockException('cancel'));
+            }
+            return ReadableStreamReaderGenericCancel(this, reason);
+        }
+        /**
+         * Returns a promise that allows access to the next chunk from the stream's internal queue, if available.
+         *
+         * If reading a chunk causes the queue to become empty, more data will be pulled from the underlying source.
+         */
+        read() {
+            if (!IsReadableStreamDefaultReader(this)) {
+                return promiseRejectedWith(defaultReaderBrandCheckException('read'));
+            }
+            if (this._ownerReadableStream === undefined) {
+                return promiseRejectedWith(readerLockException('read from'));
+            }
+            let resolvePromise;
+            let rejectPromise;
+            const promise = newPromise((resolve, reject) => {
+                resolvePromise = resolve;
+                rejectPromise = reject;
+            });
+            const readRequest = {
+                _chunkSteps: chunk => resolvePromise({ value: chunk, done: false }),
+                _closeSteps: () => resolvePromise({ value: undefined, done: true }),
+                _errorSteps: e => rejectPromise(e)
+            };
+            ReadableStreamDefaultReaderRead(this, readRequest);
+            return promise;
+        }
+        /**
+         * Releases the reader's lock on the corresponding stream. After the lock is released, the reader is no longer active.
+         * If the associated stream is errored when the lock is released, the reader will appear errored in the same way
+         * from now on; otherwise, the reader will appear closed.
+         *
+         * A reader's lock cannot be released while it still has a pending read request, i.e., if a promise returned by
+         * the reader's {@link ReadableStreamDefaultReader.read | read()} method has not yet been settled. Attempting to
+         * do so will throw a `TypeError` and leave the reader locked to the stream.
+         */
+        releaseLock() {
+            if (!IsReadableStreamDefaultReader(this)) {
+                throw defaultReaderBrandCheckException('releaseLock');
+            }
+            if (this._ownerReadableStream === undefined) {
+                return;
+            }
+            if (this._readRequests.length > 0) {
+                throw new TypeError('Tried to release a reader lock when that reader has pending read() calls un-settled');
+            }
+            ReadableStreamReaderGenericRelease(this);
+        }
+    }
+    Object.defineProperties(ReadableStreamDefaultReader.prototype, {
+        cancel: { enumerable: true },
+        read: { enumerable: true },
+        releaseLock: { enumerable: true },
+        closed: { enumerable: true }
+    });
+    if (typeof SymbolPolyfill.toStringTag === 'symbol') {
+        Object.defineProperty(ReadableStreamDefaultReader.prototype, SymbolPolyfill.toStringTag, {
+            value: 'ReadableStreamDefaultReader',
+            configurable: true
+        });
+    }
+    // Abstract operations for the readers.
+    function IsReadableStreamDefaultReader(x) {
+        if (!typeIsObject(x)) {
+            return false;
+        }
+        if (!Object.prototype.hasOwnProperty.call(x, '_readRequests')) {
+            return false;
+        }
+        return x instanceof ReadableStreamDefaultReader;
+    }
+    function ReadableStreamDefaultReaderRead(reader, readRequest) {
+        const stream = reader._ownerReadableStream;
+        stream._disturbed = true;
+        if (stream._state === 'closed') {
+            readRequest._closeSteps();
+        }
+        else if (stream._state === 'errored') {
+            readRequest._errorSteps(stream._storedError);
+        }
+        else {
+            stream._readableStreamController[PullSteps](readRequest);
+        }
+    }
+    // Helper functions for the ReadableStreamDefaultReader.
+    function defaultReaderBrandCheckException(name) {
+        return new TypeError(`ReadableStreamDefaultReader.prototype.${name} can only be used on a ReadableStreamDefaultReader`);
+    }
+
+    /// <reference lib="es2018.asynciterable" />
+    /* eslint-disable @typescript-eslint/no-empty-function */
+    const AsyncIteratorPrototype = Object.getPrototypeOf(Object.getPrototypeOf(async function* () { }).prototype);
+
+    /// <reference lib="es2018.asynciterable" />
+    class ReadableStreamAsyncIteratorImpl {
+        constructor(reader, preventCancel) {
+            this._ongoingPromise = undefined;
+            this._isFinished = false;
+            this._reader = reader;
+            this._preventCancel = preventCancel;
+        }
+        next() {
+            const nextSteps = () => this._nextSteps();
+            this._ongoingPromise = this._ongoingPromise ?
+                transformPromiseWith(this._ongoingPromise, nextSteps, nextSteps) :
+                nextSteps();
+            return this._ongoingPromise;
+        }
+        return(value) {
+            const returnSteps = () => this._returnSteps(value);
+            return this._ongoingPromise ?
+                transformPromiseWith(this._ongoingPromise, returnSteps, returnSteps) :
+                returnSteps();
+        }
+        _nextSteps() {
+            if (this._isFinished) {
+                return Promise.resolve({ value: undefined, done: true });
+            }
+            const reader = this._reader;
+            if (reader._ownerReadableStream === undefined) {
+                return promiseRejectedWith(readerLockException('iterate'));
+            }
+            let resolvePromise;
+            let rejectPromise;
+            const promise = newPromise((resolve, reject) => {
+                resolvePromise = resolve;
+                rejectPromise = reject;
+            });
+            const readRequest = {
+                _chunkSteps: chunk => {
+                    this._ongoingPromise = undefined;
+                    // This needs to be delayed by one microtask, otherwise we stop pulling too early which breaks a test.
+                    // FIXME Is this a bug in the specification, or in the test?
+                    queueMicrotask(() => resolvePromise({ value: chunk, done: false }));
+                },
+                _closeSteps: () => {
+                    this._ongoingPromise = undefined;
+                    this._isFinished = true;
+                    ReadableStreamReaderGenericRelease(reader);
+                    resolvePromise({ value: undefined, done: true });
+                },
+                _errorSteps: reason => {
+                    this._ongoingPromise = undefined;
+                    this._isFinished = true;
+                    ReadableStreamReaderGenericRelease(reader);
+                    rejectPromise(reason);
+                }
+            };
+            ReadableStreamDefaultReaderRead(reader, readRequest);
+            return promise;
+        }
+        _returnSteps(value) {
+            if (this._isFinished) {
+                return Promise.resolve({ value, done: true });
+            }
+            this._isFinished = true;
+            const reader = this._reader;
+            if (reader._ownerReadableStream === undefined) {
+                return promiseRejectedWith(readerLockException('finish iterating'));
+            }
+            if (!this._preventCancel) {
+                const result = ReadableStreamReaderGenericCancel(reader, value);
+                ReadableStreamReaderGenericRelease(reader);
+                return transformPromiseWith(result, () => ({ value, done: true }));
+            }
+            ReadableStreamReaderGenericRelease(reader);
+            return promiseResolvedWith({ value, done: true });
+        }
+    }
+    const ReadableStreamAsyncIteratorPrototype = {
+        next() {
+            if (!IsReadableStreamAsyncIterator(this)) {
+                return promiseRejectedWith(streamAsyncIteratorBrandCheckException('next'));
+            }
+            return this._asyncIteratorImpl.next();
+        },
+        return(value) {
+            if (!IsReadableStreamAsyncIterator(this)) {
+                return promiseRejectedWith(streamAsyncIteratorBrandCheckException('return'));
+            }
+            return this._asyncIteratorImpl.return(value);
+        }
+    };
+    if (AsyncIteratorPrototype !== undefined) {
+        Object.setPrototypeOf(ReadableStreamAsyncIteratorPrototype, AsyncIteratorPrototype);
+    }
+    // Abstract operations for the ReadableStream.
+    function AcquireReadableStreamAsyncIterator(stream, preventCancel) {
+        const reader = AcquireReadableStreamDefaultReader(stream);
+        const impl = new ReadableStreamAsyncIteratorImpl(reader, preventCancel);
+        const iterator = Object.create(ReadableStreamAsyncIteratorPrototype);
+        iterator._asyncIteratorImpl = impl;
+        return iterator;
+    }
+    function IsReadableStreamAsyncIterator(x) {
+        if (!typeIsObject(x)) {
+            return false;
+        }
+        if (!Object.prototype.hasOwnProperty.call(x, '_asyncIteratorImpl')) {
+            return false;
+        }
+        try {
+            // noinspection SuspiciousTypeOfGuard
+            return x._asyncIteratorImpl instanceof
+                ReadableStreamAsyncIteratorImpl;
+        }
+        catch (_a) {
+            return false;
+        }
+    }
+    // Helper functions for the ReadableStream.
+    function streamAsyncIteratorBrandCheckException(name) {
+        return new TypeError(`ReadableStreamAsyncIterator.${name} can only be used on a ReadableSteamAsyncIterator`);
+    }
+
+    /// <reference lib="es2015.core" />
+    // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Number/isNaN#Polyfill
+    const NumberIsNaN = Number.isNaN || function (x) {
+        // eslint-disable-next-line no-self-compare
+        return x !== x;
+    };
+
+    function CreateArrayFromList(elements) {
+        // We use arrays to represent lists, so this is basically a no-op.
+        // Do a slice though just in case we happen to depend on the unique-ness.
+        return elements.slice();
+    }
+    function CopyDataBlockBytes(dest, destOffset, src, srcOffset, n) {
+        new Uint8Array(dest).set(new Uint8Array(src, srcOffset, n), destOffset);
+    }
+    // Not implemented correctly
+    function TransferArrayBuffer(O) {
+        return O;
+    }
+    // Not implemented correctly
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    function IsDetachedBuffer(O) {
+        return false;
+    }
+    function ArrayBufferSlice(buffer, begin, end) {
+        // ArrayBuffer.prototype.slice is not available on IE10
+        // https://www.caniuse.com/mdn-javascript_builtins_arraybuffer_slice
+        if (buffer.slice) {
+            return buffer.slice(begin, end);
+        }
+        const length = end - begin;
+        const slice = new ArrayBuffer(length);
+        CopyDataBlockBytes(slice, 0, buffer, begin, length);
+        return slice;
+    }
+
+    function IsNonNegativeNumber(v) {
+        if (typeof v !== 'number') {
+            return false;
+        }
+        if (NumberIsNaN(v)) {
+            return false;
+        }
+        if (v < 0) {
+            return false;
+        }
+        return true;
+    }
+    function CloneAsUint8Array(O) {
+        const buffer = ArrayBufferSlice(O.buffer, O.byteOffset, O.byteOffset + O.byteLength);
+        return new Uint8Array(buffer);
+    }
+
+    function DequeueValue(container) {
+        const pair = container._queue.shift();
+        container._queueTotalSize -= pair.size;
+        if (container._queueTotalSize < 0) {
+            container._queueTotalSize = 0;
+        }
+        return pair.value;
+    }
+    function EnqueueValueWithSize(container, value, size) {
+        if (!IsNonNegativeNumber(size) || size === Infinity) {
+            throw new RangeError('Size must be a finite, non-NaN, non-negative number.');
+        }
+        container._queue.push({ value, size });
+        container._queueTotalSize += size;
+    }
+    function PeekQueueValue(container) {
+        const pair = container._queue.peek();
+        return pair.value;
+    }
+    function ResetQueue(container) {
+        container._queue = new SimpleQueue();
+        container._queueTotalSize = 0;
+    }
+
+    /**
+     * A pull-into request in a {@link ReadableByteStreamController}.
+     *
+     * @public
+     */
+    class ReadableStreamBYOBRequest {
+        constructor() {
+            throw new TypeError('Illegal constructor');
+        }
+        /**
+         * Returns the view for writing in to, or `null` if the BYOB request has already been responded to.
+         */
+        get view() {
+            if (!IsReadableStreamBYOBRequest(this)) {
+                throw byobRequestBrandCheckException('view');
+            }
+            return this._view;
+        }
+        respond(bytesWritten) {
+            if (!IsReadableStreamBYOBRequest(this)) {
+                throw byobRequestBrandCheckException('respond');
+            }
+            assertRequiredArgument(bytesWritten, 1, 'respond');
+            bytesWritten = convertUnsignedLongLongWithEnforceRange(bytesWritten, 'First parameter');
+            if (this._associatedReadableByteStreamController === undefined) {
+                throw new TypeError('This BYOB request has been invalidated');
+            }
+            if (IsDetachedBuffer(this._view.buffer)) ;
+            ReadableByteStreamControllerRespond(this._associatedReadableByteStreamController, bytesWritten);
+        }
+        respondWithNewView(view) {
+            if (!IsReadableStreamBYOBRequest(this)) {
+                throw byobRequestBrandCheckException('respondWithNewView');
+            }
+            assertRequiredArgument(view, 1, 'respondWithNewView');
+            if (!ArrayBuffer.isView(view)) {
+                throw new TypeError('You can only respond with array buffer views');
+            }
+            if (this._associatedReadableByteStreamController === undefined) {
+                throw new TypeError('This BYOB request has been invalidated');
+            }
+            if (IsDetachedBuffer(view.buffer)) ;
+            ReadableByteStreamControllerRespondWithNewView(this._associatedReadableByteStreamController, view);
+        }
+    }
+    Object.defineProperties(ReadableStreamBYOBRequest.prototype, {
+        respond: { enumerable: true },
+        respondWithNewView: { enumerable: true },
+        view: { enumerable: true }
+    });
+    if (typeof SymbolPolyfill.toStringTag === 'symbol') {
+        Object.defineProperty(ReadableStreamBYOBRequest.prototype, SymbolPolyfill.toStringTag, {
+            value: 'ReadableStreamBYOBRequest',
+            configurable: true
+        });
+    }
+    /**
+     * Allows control of a {@link ReadableStream | readable byte stream}'s state and internal queue.
+     *
+     * @public
+     */
+    class ReadableByteStreamController {
+        constructor() {
+            throw new TypeError('Illegal constructor');
+        }
+        /**
+         * Returns the current BYOB pull request, or `null` if there isn't one.
+         */
+        get byobRequest() {
+            if (!IsReadableByteStreamController(this)) {
+                throw byteStreamControllerBrandCheckException('byobRequest');
+            }
+            return ReadableByteStreamControllerGetBYOBRequest(this);
+        }
+        /**
+         * Returns the desired size to fill the controlled stream's internal queue. It can be negative, if the queue is
+         * over-full. An underlying byte source ought to use this information to determine when and how to apply backpressure.
+         */
+        get desiredSize() {
+            if (!IsReadableByteStreamController(this)) {
+                throw byteStreamControllerBrandCheckException('desiredSize');
+            }
+            return ReadableByteStreamControllerGetDesiredSize(this);
+        }
+        /**
+         * Closes the controlled readable stream. Consumers will still be able to read any previously-enqueued chunks from
+         * the stream, but once those are read, the stream will become closed.
+         */
+        close() {
+            if (!IsReadableByteStreamController(this)) {
+                throw byteStreamControllerBrandCheckException('close');
+            }
+            if (this._closeRequested) {
+                throw new TypeError('The stream has already been closed; do not close it again!');
+            }
+            const state = this._controlledReadableByteStream._state;
+            if (state !== 'readable') {
+                throw new TypeError(`The stream (in ${state} state) is not in the readable state and cannot be closed`);
+            }
+            ReadableByteStreamControllerClose(this);
+        }
+        enqueue(chunk) {
+            if (!IsReadableByteStreamController(this)) {
+                throw byteStreamControllerBrandCheckException('enqueue');
+            }
+            assertRequiredArgument(chunk, 1, 'enqueue');
+            if (!ArrayBuffer.isView(chunk)) {
+                throw new TypeError('chunk must be an array buffer view');
+            }
+            if (chunk.byteLength === 0) {
+                throw new TypeError('chunk must have non-zero byteLength');
+            }
+            if (chunk.buffer.byteLength === 0) {
+                throw new TypeError(`chunk's buffer must have non-zero byteLength`);
+            }
+            if (this._closeRequested) {
+                throw new TypeError('stream is closed or draining');
+            }
+            const state = this._controlledReadableByteStream._state;
+            if (state !== 'readable') {
+                throw new TypeError(`The stream (in ${state} state) is not in the readable state and cannot be enqueued to`);
+            }
+            ReadableByteStreamControllerEnqueue(this, chunk);
+        }
+        /**
+         * Errors the controlled readable stream, making all future interactions with it fail with the given error `e`.
+         */
+        error(e = undefined) {
+            if (!IsReadableByteStreamController(this)) {
+                throw byteStreamControllerBrandCheckException('error');
+            }
+            ReadableByteStreamControllerError(this, e);
+        }
+        /** @internal */
+        [CancelSteps](reason) {
+            ReadableByteStreamControllerClearPendingPullIntos(this);
+            ResetQueue(this);
+            const result = this._cancelAlgorithm(reason);
+            ReadableByteStreamControllerClearAlgorithms(this);
+            return result;
+        }
+        /** @internal */
+        [PullSteps](readRequest) {
+            const stream = this._controlledReadableByteStream;
+            if (this._queueTotalSize > 0) {
+                const entry = this._queue.shift();
+                this._queueTotalSize -= entry.byteLength;
+                ReadableByteStreamControllerHandleQueueDrain(this);
+                const view = new Uint8Array(entry.buffer, entry.byteOffset, entry.byteLength);
+                readRequest._chunkSteps(view);
+                return;
+            }
+            const autoAllocateChunkSize = this._autoAllocateChunkSize;
+            if (autoAllocateChunkSize !== undefined) {
+                let buffer;
+                try {
+                    buffer = new ArrayBuffer(autoAllocateChunkSize);
+                }
+                catch (bufferE) {
+                    readRequest._errorSteps(bufferE);
+                    return;
+                }
+                const pullIntoDescriptor = {
+                    buffer,
+                    bufferByteLength: autoAllocateChunkSize,
+                    byteOffset: 0,
+                    byteLength: autoAllocateChunkSize,
+                    bytesFilled: 0,
+                    elementSize: 1,
+                    viewConstructor: Uint8Array,
+                    readerType: 'default'
+                };
+                this._pendingPullIntos.push(pullIntoDescriptor);
+            }
+            ReadableStreamAddReadRequest(stream, readRequest);
+            ReadableByteStreamControllerCallPullIfNeeded(this);
+        }
+    }
+    Object.defineProperties(ReadableByteStreamController.prototype, {
+        close: { enumerable: true },
+        enqueue: { enumerable: true },
+        error: { enumerable: true },
+        byobRequest: { enumerable: true },
+        desiredSize: { enumerable: true }
+    });
+    if (typeof SymbolPolyfill.toStringTag === 'symbol') {
+        Object.defineProperty(ReadableByteStreamController.prototype, SymbolPolyfill.toStringTag, {
+            value: 'ReadableByteStreamController',
+            configurable: true
+        });
+    }
+    // Abstract operations for the ReadableByteStreamController.
+    function IsReadableByteStreamController(x) {
+        if (!typeIsObject(x)) {
+            return false;
+        }
+        if (!Object.prototype.hasOwnProperty.call(x, '_controlledReadableByteStream')) {
+            return false;
+        }
+        return x instanceof ReadableByteStreamController;
+    }
+    function IsReadableStreamBYOBRequest(x) {
+        if (!typeIsObject(x)) {
+            return false;
+        }
+        if (!Object.prototype.hasOwnProperty.call(x, '_associatedReadableByteStreamController')) {
+            return false;
+        }
+        return x instanceof ReadableStreamBYOBRequest;
+    }
+    function ReadableByteStreamControllerCallPullIfNeeded(controller) {
+        const shouldPull = ReadableByteStreamControllerShouldCallPull(controller);
+        if (!shouldPull) {
+            return;
+        }
+        if (controller._pulling) {
+            controller._pullAgain = true;
+            return;
+        }
+        controller._pulling = true;
+        // TODO: Test controller argument
+        const pullPromise = controller._pullAlgorithm();
+        uponPromise(pullPromise, () => {
+            controller._pulling = false;
+            if (controller._pullAgain) {
+                controller._pullAgain = false;
+                ReadableByteStreamControllerCallPullIfNeeded(controller);
+            }
+        }, e => {
+            ReadableByteStreamControllerError(controller, e);
+        });
+    }
+    function ReadableByteStreamControllerClearPendingPullIntos(controller) {
+        ReadableByteStreamControllerInvalidateBYOBRequest(controller);
+        controller._pendingPullIntos = new SimpleQueue();
+    }
+    function ReadableByteStreamControllerCommitPullIntoDescriptor(stream, pullIntoDescriptor) {
+        let done = false;
+        if (stream._state === 'closed') {
+            done = true;
+        }
+        const filledView = ReadableByteStreamControllerConvertPullIntoDescriptor(pullIntoDescriptor);
+        if (pullIntoDescriptor.readerType === 'default') {
+            ReadableStreamFulfillReadRequest(stream, filledView, done);
+        }
+        else {
+            ReadableStreamFulfillReadIntoRequest(stream, filledView, done);
+        }
+    }
+    function ReadableByteStreamControllerConvertPullIntoDescriptor(pullIntoDescriptor) {
+        const bytesFilled = pullIntoDescriptor.bytesFilled;
+        const elementSize = pullIntoDescriptor.elementSize;
+        return new pullIntoDescriptor.viewConstructor(pullIntoDescriptor.buffer, pullIntoDescriptor.byteOffset, bytesFilled / elementSize);
+    }
+    function ReadableByteStreamControllerEnqueueChunkToQueue(controller, buffer, byteOffset, byteLength) {
+        controller._queue.push({ buffer, byteOffset, byteLength });
+        controller._queueTotalSize += byteLength;
+    }
+    function ReadableByteStreamControllerFillPullIntoDescriptorFromQueue(controller, pullIntoDescriptor) {
+        const elementSize = pullIntoDescriptor.elementSize;
+        const currentAlignedBytes = pullIntoDescriptor.bytesFilled - pullIntoDescriptor.bytesFilled % elementSize;
+        const maxBytesToCopy = Math.min(controller._queueTotalSize, pullIntoDescriptor.byteLength - pullIntoDescriptor.bytesFilled);
+        const maxBytesFilled = pullIntoDescriptor.bytesFilled + maxBytesToCopy;
+        const maxAlignedBytes = maxBytesFilled - maxBytesFilled % elementSize;
+        let totalBytesToCopyRemaining = maxBytesToCopy;
+        let ready = false;
+        if (maxAlignedBytes > currentAlignedBytes) {
+            totalBytesToCopyRemaining = maxAlignedBytes - pullIntoDescriptor.bytesFilled;
+            ready = true;
+        }
+        const queue = controller._queue;
+        while (totalBytesToCopyRemaining > 0) {
+            const headOfQueue = queue.peek();
+            const bytesToCopy = Math.min(totalBytesToCopyRemaining, headOfQueue.byteLength);
+            const destStart = pullIntoDescriptor.byteOffset + pullIntoDescriptor.bytesFilled;
+            CopyDataBlockBytes(pullIntoDescriptor.buffer, destStart, headOfQueue.buffer, headOfQueue.byteOffset, bytesToCopy);
+            if (headOfQueue.byteLength === bytesToCopy) {
+                queue.shift();
+            }
+            else {
+                headOfQueue.byteOffset += bytesToCopy;
+                headOfQueue.byteLength -= bytesToCopy;
+            }
+            controller._queueTotalSize -= bytesToCopy;
+            ReadableByteStreamControllerFillHeadPullIntoDescriptor(controller, bytesToCopy, pullIntoDescriptor);
+            totalBytesToCopyRemaining -= bytesToCopy;
+        }
+        return ready;
+    }
+    function ReadableByteStreamControllerFillHeadPullIntoDescriptor(controller, size, pullIntoDescriptor) {
+        pullIntoDescriptor.bytesFilled += size;
+    }
+    function ReadableByteStreamControllerHandleQueueDrain(controller) {
+        if (controller._queueTotalSize === 0 && controller._closeRequested) {
+            ReadableByteStreamControllerClearAlgorithms(controller);
+            ReadableStreamClose(controller._controlledReadableByteStream);
+        }
+        else {
+            ReadableByteStreamControllerCallPullIfNeeded(controller);
+        }
+    }
+    function ReadableByteStreamControllerInvalidateBYOBRequest(controller) {
+        if (controller._byobRequest === null) {
+            return;
+        }
+        controller._byobRequest._associatedReadableByteStreamController = undefined;
+        controller._byobRequest._view = null;
+        controller._byobRequest = null;
+    }
+    function ReadableByteStreamControllerProcessPullIntoDescriptorsUsingQueue(controller) {
+        while (controller._pendingPullIntos.length > 0) {
+            if (controller._queueTotalSize === 0) {
+                return;
+            }
+            const pullIntoDescriptor = controller._pendingPullIntos.peek();
+            if (ReadableByteStreamControllerFillPullIntoDescriptorFromQueue(controller, pullIntoDescriptor)) {
+                ReadableByteStreamControllerShiftPendingPullInto(controller);
+                ReadableByteStreamControllerCommitPullIntoDescriptor(controller._controlledReadableByteStream, pullIntoDescriptor);
+            }
+        }
+    }
+    function ReadableByteStreamControllerPullInto(controller, view, readIntoRequest) {
+        const stream = controller._controlledReadableByteStream;
+        let elementSize = 1;
+        if (view.constructor !== DataView) {
+            elementSize = view.constructor.BYTES_PER_ELEMENT;
+        }
+        const ctor = view.constructor;
+        // try {
+        const buffer = TransferArrayBuffer(view.buffer);
+        // } catch (e) {
+        //   readIntoRequest._errorSteps(e);
+        //   return;
+        // }
+        const pullIntoDescriptor = {
+            buffer,
+            bufferByteLength: buffer.byteLength,
+            byteOffset: view.byteOffset,
+            byteLength: view.byteLength,
+            bytesFilled: 0,
+            elementSize,
+            viewConstructor: ctor,
+            readerType: 'byob'
+        };
+        if (controller._pendingPullIntos.length > 0) {
+            controller._pendingPullIntos.push(pullIntoDescriptor);
+            // No ReadableByteStreamControllerCallPullIfNeeded() call since:
+            // - No change happens on desiredSize
+            // - The source has already been notified of that there's at least 1 pending read(view)
+            ReadableStreamAddReadIntoRequest(stream, readIntoRequest);
+            return;
+        }
+        if (stream._state === 'closed') {
+            const emptyView = new ctor(pullIntoDescriptor.buffer, pullIntoDescriptor.byteOffset, 0);
+            readIntoRequest._closeSteps(emptyView);
+            return;
+        }
+        if (controller._queueTotalSize > 0) {
+            if (ReadableByteStreamControllerFillPullIntoDescriptorFromQueue(controller, pullIntoDescriptor)) {
+                const filledView = ReadableByteStreamControllerConvertPullIntoDescriptor(pullIntoDescriptor);
+                ReadableByteStreamControllerHandleQueueDrain(controller);
+                readIntoRequest._chunkSteps(filledView);
+                return;
+            }
+            if (controller._closeRequested) {
+                const e = new TypeError('Insufficient bytes to fill elements in the given buffer');
+                ReadableByteStreamControllerError(controller, e);
+                readIntoRequest._errorSteps(e);
+                return;
+            }
+        }
+        controller._pendingPullIntos.push(pullIntoDescriptor);
+        ReadableStreamAddReadIntoRequest(stream, readIntoRequest);
+        ReadableByteStreamControllerCallPullIfNeeded(controller);
+    }
+    function ReadableByteStreamControllerRespondInClosedState(controller, firstDescriptor) {
+        const stream = controller._controlledReadableByteStream;
+        if (ReadableStreamHasBYOBReader(stream)) {
+            while (ReadableStreamGetNumReadIntoRequests(stream) > 0) {
+                const pullIntoDescriptor = ReadableByteStreamControllerShiftPendingPullInto(controller);
+                ReadableByteStreamControllerCommitPullIntoDescriptor(stream, pullIntoDescriptor);
+            }
+        }
+    }
+    function ReadableByteStreamControllerRespondInReadableState(controller, bytesWritten, pullIntoDescriptor) {
+        ReadableByteStreamControllerFillHeadPullIntoDescriptor(controller, bytesWritten, pullIntoDescriptor);
+        if (pullIntoDescriptor.bytesFilled < pullIntoDescriptor.elementSize) {
+            return;
+        }
+        ReadableByteStreamControllerShiftPendingPullInto(controller);
+        const remainderSize = pullIntoDescriptor.bytesFilled % pullIntoDescriptor.elementSize;
+        if (remainderSize > 0) {
+            const end = pullIntoDescriptor.byteOffset + pullIntoDescriptor.bytesFilled;
+            const remainder = ArrayBufferSlice(pullIntoDescriptor.buffer, end - remainderSize, end);
+            ReadableByteStreamControllerEnqueueChunkToQueue(controller, remainder, 0, remainder.byteLength);
+        }
+        pullIntoDescriptor.bytesFilled -= remainderSize;
+        ReadableByteStreamControllerCommitPullIntoDescriptor(controller._controlledReadableByteStream, pullIntoDescriptor);
+        ReadableByteStreamControllerProcessPullIntoDescriptorsUsingQueue(controller);
+    }
+    function ReadableByteStreamControllerRespondInternal(controller, bytesWritten) {
+        const firstDescriptor = controller._pendingPullIntos.peek();
+        ReadableByteStreamControllerInvalidateBYOBRequest(controller);
+        const state = controller._controlledReadableByteStream._state;
+        if (state === 'closed') {
+            ReadableByteStreamControllerRespondInClosedState(controller);
+        }
+        else {
+            ReadableByteStreamControllerRespondInReadableState(controller, bytesWritten, firstDescriptor);
+        }
+        ReadableByteStreamControllerCallPullIfNeeded(controller);
+    }
+    function ReadableByteStreamControllerShiftPendingPullInto(controller) {
+        const descriptor = controller._pendingPullIntos.shift();
+        return descriptor;
+    }
+    function ReadableByteStreamControllerShouldCallPull(controller) {
+        const stream = controller._controlledReadableByteStream;
+        if (stream._state !== 'readable') {
+            return false;
+        }
+        if (controller._closeRequested) {
+            return false;
+        }
+        if (!controller._started) {
+            return false;
+        }
+        if (ReadableStreamHasDefaultReader(stream) && ReadableStreamGetNumReadRequests(stream) > 0) {
+            return true;
+        }
+        if (ReadableStreamHasBYOBReader(stream) && ReadableStreamGetNumReadIntoRequests(stream) > 0) {
+            return true;
+        }
+        const desiredSize = ReadableByteStreamControllerGetDesiredSize(controller);
+        if (desiredSize > 0) {
+            return true;
+        }
+        return false;
+    }
+    function ReadableByteStreamControllerClearAlgorithms(controller) {
+        controller._pullAlgorithm = undefined;
+        controller._cancelAlgorithm = undefined;
+    }
+    // A client of ReadableByteStreamController may use these functions directly to bypass state check.
+    function ReadableByteStreamControllerClose(controller) {
+        const stream = controller._controlledReadableByteStream;
+        if (controller._closeRequested || stream._state !== 'readable') {
+            return;
+        }
+        if (controller._queueTotalSize > 0) {
+            controller._closeRequested = true;
+            return;
+        }
+        if (controller._pendingPullIntos.length > 0) {
+            const firstPendingPullInto = controller._pendingPullIntos.peek();
+            if (firstPendingPullInto.bytesFilled > 0) {
+                const e = new TypeError('Insufficient bytes to fill elements in the given buffer');
+                ReadableByteStreamControllerError(controller, e);
+                throw e;
+            }
+        }
+        ReadableByteStreamControllerClearAlgorithms(controller);
+        ReadableStreamClose(stream);
+    }
+    function ReadableByteStreamControllerEnqueue(controller, chunk) {
+        const stream = controller._controlledReadableByteStream;
+        if (controller._closeRequested || stream._state !== 'readable') {
+            return;
+        }
+        const buffer = chunk.buffer;
+        const byteOffset = chunk.byteOffset;
+        const byteLength = chunk.byteLength;
+        const transferredBuffer = TransferArrayBuffer(buffer);
+        if (controller._pendingPullIntos.length > 0) {
+            const firstPendingPullInto = controller._pendingPullIntos.peek();
+            if (IsDetachedBuffer(firstPendingPullInto.buffer)) ;
+            firstPendingPullInto.buffer = TransferArrayBuffer(firstPendingPullInto.buffer);
+        }
+        ReadableByteStreamControllerInvalidateBYOBRequest(controller);
+        if (ReadableStreamHasDefaultReader(stream)) {
+            if (ReadableStreamGetNumReadRequests(stream) === 0) {
+                ReadableByteStreamControllerEnqueueChunkToQueue(controller, transferredBuffer, byteOffset, byteLength);
+            }
+            else {
+                if (controller._pendingPullIntos.length > 0) {
+                    ReadableByteStreamControllerShiftPendingPullInto(controller);
+                }
+                const transferredView = new Uint8Array(transferredBuffer, byteOffset, byteLength);
+                ReadableStreamFulfillReadRequest(stream, transferredView, false);
+            }
+        }
+        else if (ReadableStreamHasBYOBReader(stream)) {
+            // TODO: Ideally in this branch detaching should happen only if the buffer is not consumed fully.
+            ReadableByteStreamControllerEnqueueChunkToQueue(controller, transferredBuffer, byteOffset, byteLength);
+            ReadableByteStreamControllerProcessPullIntoDescriptorsUsingQueue(controller);
+        }
+        else {
+            ReadableByteStreamControllerEnqueueChunkToQueue(controller, transferredBuffer, byteOffset, byteLength);
+        }
+        ReadableByteStreamControllerCallPullIfNeeded(controller);
+    }
+    function ReadableByteStreamControllerError(controller, e) {
+        const stream = controller._controlledReadableByteStream;
+        if (stream._state !== 'readable') {
+            return;
+        }
+        ReadableByteStreamControllerClearPendingPullIntos(controller);
+        ResetQueue(controller);
+        ReadableByteStreamControllerClearAlgorithms(controller);
+        ReadableStreamError(stream, e);
+    }
+    function ReadableByteStreamControllerGetBYOBRequest(controller) {
+        if (controller._byobRequest === null && controller._pendingPullIntos.length > 0) {
+            const firstDescriptor = controller._pendingPullIntos.peek();
+            const view = new Uint8Array(firstDescriptor.buffer, firstDescriptor.byteOffset + firstDescriptor.bytesFilled, firstDescriptor.byteLength - firstDescriptor.bytesFilled);
+            const byobRequest = Object.create(ReadableStreamBYOBRequest.prototype);
+            SetUpReadableStreamBYOBRequest(byobRequest, controller, view);
+            controller._byobRequest = byobRequest;
+        }
+        return controller._byobRequest;
+    }
+    function ReadableByteStreamControllerGetDesiredSize(controller) {
+        const state = controller._controlledReadableByteStream._state;
+        if (state === 'errored') {
+            return null;
+        }
+        if (state === 'closed') {
+            return 0;
+        }
+        return controller._strategyHWM - controller._queueTotalSize;
+    }
+    function ReadableByteStreamControllerRespond(controller, bytesWritten) {
+        const firstDescriptor = controller._pendingPullIntos.peek();
+        const state = controller._controlledReadableByteStream._state;
+        if (state === 'closed') {
+            if (bytesWritten !== 0) {
+                throw new TypeError('bytesWritten must be 0 when calling respond() on a closed stream');
+            }
+        }
+        else {
+            if (bytesWritten === 0) {
+                throw new TypeError('bytesWritten must be greater than 0 when calling respond() on a readable stream');
+            }
+            if (firstDescriptor.bytesFilled + bytesWritten > firstDescriptor.byteLength) {
+                throw new RangeError('bytesWritten out of range');
+            }
+        }
+        firstDescriptor.buffer = TransferArrayBuffer(firstDescriptor.buffer);
+        ReadableByteStreamControllerRespondInternal(controller, bytesWritten);
+    }
+    function ReadableByteStreamControllerRespondWithNewView(controller, view) {
+        const firstDescriptor = controller._pendingPullIntos.peek();
+        const state = controller._controlledReadableByteStream._state;
+        if (state === 'closed') {
+            if (view.byteLength !== 0) {
+                throw new TypeError('The view\'s length must be 0 when calling respondWithNewView() on a closed stream');
+            }
+        }
+        else {
+            if (view.byteLength === 0) {
+                throw new TypeError('The view\'s length must be greater than 0 when calling respondWithNewView() on a readable stream');
+            }
+        }
+        if (firstDescriptor.byteOffset + firstDescriptor.bytesFilled !== view.byteOffset) {
+            throw new RangeError('The region specified by view does not match byobRequest');
+        }
+        if (firstDescriptor.bufferByteLength !== view.buffer.byteLength) {
+            throw new RangeError('The buffer of view has different capacity than byobRequest');
+        }
+        if (firstDescriptor.bytesFilled + view.byteLength > firstDescriptor.byteLength) {
+            throw new RangeError('The region specified by view is larger than byobRequest');
+        }
+        const viewByteLength = view.byteLength;
+        firstDescriptor.buffer = TransferArrayBuffer(view.buffer);
+        ReadableByteStreamControllerRespondInternal(controller, viewByteLength);
+    }
+    function SetUpReadableByteStreamController(stream, controller, startAlgorithm, pullAlgorithm, cancelAlgorithm, highWaterMark, autoAllocateChunkSize) {
+        controller._controlledReadableByteStream = stream;
+        controller._pullAgain = false;
+        controller._pulling = false;
+        controller._byobRequest = null;
+        // Need to set the slots so that the assert doesn't fire. In the spec the slots already exist implicitly.
+        controller._queue = controller._queueTotalSize = undefined;
+        ResetQueue(controller);
+        controller._closeRequested = false;
+        controller._started = false;
+        controller._strategyHWM = highWaterMark;
+        controller._pullAlgorithm = pullAlgorithm;
+        controller._cancelAlgorithm = cancelAlgorithm;
+        controller._autoAllocateChunkSize = autoAllocateChunkSize;
+        controller._pendingPullIntos = new SimpleQueue();
+        stream._readableStreamController = controller;
+        const startResult = startAlgorithm();
+        uponPromise(promiseResolvedWith(startResult), () => {
+            controller._started = true;
+            ReadableByteStreamControllerCallPullIfNeeded(controller);
+        }, r => {
+            ReadableByteStreamControllerError(controller, r);
+        });
+    }
+    function SetUpReadableByteStreamControllerFromUnderlyingSource(stream, underlyingByteSource, highWaterMark) {
+        const controller = Object.create(ReadableByteStreamController.prototype);
+        let startAlgorithm = () => undefined;
+        let pullAlgorithm = () => promiseResolvedWith(undefined);
+        let cancelAlgorithm = () => promiseResolvedWith(undefined);
+        if (underlyingByteSource.start !== undefined) {
+            startAlgorithm = () => underlyingByteSource.start(controller);
+        }
+        if (underlyingByteSource.pull !== undefined) {
+            pullAlgorithm = () => underlyingByteSource.pull(controller);
+        }
+        if (underlyingByteSource.cancel !== undefined) {
+            cancelAlgorithm = reason => underlyingByteSource.cancel(reason);
+        }
+        const autoAllocateChunkSize = underlyingByteSource.autoAllocateChunkSize;
+        if (autoAllocateChunkSize === 0) {
+            throw new TypeError('autoAllocateChunkSize must be greater than 0');
+        }
+        SetUpReadableByteStreamController(stream, controller, startAlgorithm, pullAlgorithm, cancelAlgorithm, highWaterMark, autoAllocateChunkSize);
+    }
+    function SetUpReadableStreamBYOBRequest(request, controller, view) {
+        request._associatedReadableByteStreamController = controller;
+        request._view = view;
+    }
+    // Helper functions for the ReadableStreamBYOBRequest.
+    function byobRequestBrandCheckException(name) {
+        return new TypeError(`ReadableStreamBYOBRequest.prototype.${name} can only be used on a ReadableStreamBYOBRequest`);
+    }
+    // Helper functions for the ReadableByteStreamController.
+    function byteStreamControllerBrandCheckException(name) {
+        return new TypeError(`ReadableByteStreamController.prototype.${name} can only be used on a ReadableByteStreamController`);
+    }
+
+    // Abstract operations for the ReadableStream.
+    function AcquireReadableStreamBYOBReader(stream) {
+        return new ReadableStreamBYOBReader(stream);
+    }
+    // ReadableStream API exposed for controllers.
+    function ReadableStreamAddReadIntoRequest(stream, readIntoRequest) {
+        stream._reader._readIntoRequests.push(readIntoRequest);
+    }
+    function ReadableStreamFulfillReadIntoRequest(stream, chunk, done) {
+        const reader = stream._reader;
+        const readIntoRequest = reader._readIntoRequests.shift();
+        if (done) {
+            readIntoRequest._closeSteps(chunk);
+        }
+        else {
+            readIntoRequest._chunkSteps(chunk);
+        }
+    }
+    function ReadableStreamGetNumReadIntoRequests(stream) {
+        return stream._reader._readIntoRequests.length;
+    }
+    function ReadableStreamHasBYOBReader(stream) {
+        const reader = stream._reader;
+        if (reader === undefined) {
+            return false;
+        }
+        if (!IsReadableStreamBYOBReader(reader)) {
+            return false;
+        }
+        return true;
+    }
+    /**
+     * A BYOB reader vended by a {@link ReadableStream}.
+     *
+     * @public
+     */
+    class ReadableStreamBYOBReader {
+        constructor(stream) {
+            assertRequiredArgument(stream, 1, 'ReadableStreamBYOBReader');
+            assertReadableStream(stream, 'First parameter');
+            if (IsReadableStreamLocked(stream)) {
+                throw new TypeError('This stream has already been locked for exclusive reading by another reader');
+            }
+            if (!IsReadableByteStreamController(stream._readableStreamController)) {
+                throw new TypeError('Cannot construct a ReadableStreamBYOBReader for a stream not constructed with a byte ' +
+                    'source');
+            }
+            ReadableStreamReaderGenericInitialize(this, stream);
+            this._readIntoRequests = new SimpleQueue();
+        }
+        /**
+         * Returns a promise that will be fulfilled when the stream becomes closed, or rejected if the stream ever errors or
+         * the reader's lock is released before the stream finishes closing.
+         */
+        get closed() {
+            if (!IsReadableStreamBYOBReader(this)) {
+                return promiseRejectedWith(byobReaderBrandCheckException('closed'));
+            }
+            return this._closedPromise;
+        }
+        /**
+         * If the reader is active, behaves the same as {@link ReadableStream.cancel | stream.cancel(reason)}.
+         */
+        cancel(reason = undefined) {
+            if (!IsReadableStreamBYOBReader(this)) {
+                return promiseRejectedWith(byobReaderBrandCheckException('cancel'));
+            }
+            if (this._ownerReadableStream === undefined) {
+                return promiseRejectedWith(readerLockException('cancel'));
+            }
+            return ReadableStreamReaderGenericCancel(this, reason);
+        }
+        /**
+         * Attempts to reads bytes into view, and returns a promise resolved with the result.
+         *
+         * If reading a chunk causes the queue to become empty, more data will be pulled from the underlying source.
+         */
+        read(view) {
+            if (!IsReadableStreamBYOBReader(this)) {
+                return promiseRejectedWith(byobReaderBrandCheckException('read'));
+            }
+            if (!ArrayBuffer.isView(view)) {
+                return promiseRejectedWith(new TypeError('view must be an array buffer view'));
+            }
+            if (view.byteLength === 0) {
+                return promiseRejectedWith(new TypeError('view must have non-zero byteLength'));
+            }
+            if (view.buffer.byteLength === 0) {
+                return promiseRejectedWith(new TypeError(`view's buffer must have non-zero byteLength`));
+            }
+            if (IsDetachedBuffer(view.buffer)) ;
+            if (this._ownerReadableStream === undefined) {
+                return promiseRejectedWith(readerLockException('read from'));
+            }
+            let resolvePromise;
+            let rejectPromise;
+            const promise = newPromise((resolve, reject) => {
+                resolvePromise = resolve;
+                rejectPromise = reject;
+            });
+            const readIntoRequest = {
+                _chunkSteps: chunk => resolvePromise({ value: chunk, done: false }),
+                _closeSteps: chunk => resolvePromise({ value: chunk, done: true }),
+                _errorSteps: e => rejectPromise(e)
+            };
+            ReadableStreamBYOBReaderRead(this, view, readIntoRequest);
+            return promise;
+        }
+        /**
+         * Releases the reader's lock on the corresponding stream. After the lock is released, the reader is no longer active.
+         * If the associated stream is errored when the lock is released, the reader will appear errored in the same way
+         * from now on; otherwise, the reader will appear closed.
+         *
+         * A reader's lock cannot be released while it still has a pending read request, i.e., if a promise returned by
+         * the reader's {@link ReadableStreamBYOBReader.read | read()} method has not yet been settled. Attempting to
+         * do so will throw a `TypeError` and leave the reader locked to the stream.
+         */
+        releaseLock() {
+            if (!IsReadableStreamBYOBReader(this)) {
+                throw byobReaderBrandCheckException('releaseLock');
+            }
+            if (this._ownerReadableStream === undefined) {
+                return;
+            }
+            if (this._readIntoRequests.length > 0) {
+                throw new TypeError('Tried to release a reader lock when that reader has pending read() calls un-settled');
+            }
+            ReadableStreamReaderGenericRelease(this);
+        }
+    }
+    Object.defineProperties(ReadableStreamBYOBReader.prototype, {
+        cancel: { enumerable: true },
+        read: { enumerable: true },
+        releaseLock: { enumerable: true },
+        closed: { enumerable: true }
+    });
+    if (typeof SymbolPolyfill.toStringTag === 'symbol') {
+        Object.defineProperty(ReadableStreamBYOBReader.prototype, SymbolPolyfill.toStringTag, {
+            value: 'ReadableStreamBYOBReader',
+            configurable: true
+        });
+    }
+    // Abstract operations for the readers.
+    function IsReadableStreamBYOBReader(x) {
+        if (!typeIsObject(x)) {
+            return false;
+        }
+        if (!Object.prototype.hasOwnProperty.call(x, '_readIntoRequests')) {
+            return false;
+        }
+        return x instanceof ReadableStreamBYOBReader;
+    }
+    function ReadableStreamBYOBReaderRead(reader, view, readIntoRequest) {
+        const stream = reader._ownerReadableStream;
+        stream._disturbed = true;
+        if (stream._state === 'errored') {
+            readIntoRequest._errorSteps(stream._storedError);
+        }
+        else {
+            ReadableByteStreamControllerPullInto(stream._readableStreamController, view, readIntoRequest);
+        }
+    }
+    // Helper functions for the ReadableStreamBYOBReader.
+    function byobReaderBrandCheckException(name) {
+        return new TypeError(`ReadableStreamBYOBReader.prototype.${name} can only be used on a ReadableStreamBYOBReader`);
+    }
+
+    function ExtractHighWaterMark(strategy, defaultHWM) {
+        const { highWaterMark } = strategy;
+        if (highWaterMark === undefined) {
+            return defaultHWM;
+        }
+        if (NumberIsNaN(highWaterMark) || highWaterMark < 0) {
+            throw new RangeError('Invalid highWaterMark');
+        }
+        return highWaterMark;
+    }
+    function ExtractSizeAlgorithm(strategy) {
+        const { size } = strategy;
+        if (!size) {
+            return () => 1;
+        }
+        return size;
+    }
+
+    function convertQueuingStrategy(init, context) {
+        assertDictionary(init, context);
+        const highWaterMark = init === null || init === void 0 ? void 0 : init.highWaterMark;
+        const size = init === null || init === void 0 ? void 0 : init.size;
+        return {
+            highWaterMark: highWaterMark === undefined ? undefined : convertUnrestrictedDouble(highWaterMark),
+            size: size === undefined ? undefined : convertQueuingStrategySize(size, `${context} has member 'size' that`)
+        };
+    }
+    function convertQueuingStrategySize(fn, context) {
+        assertFunction(fn, context);
+        return chunk => convertUnrestrictedDouble(fn(chunk));
+    }
+
+    function convertUnderlyingSink(original, context) {
+        assertDictionary(original, context);
+        const abort = original === null || original === void 0 ? void 0 : original.abort;
+        const close = original === null || original === void 0 ? void 0 : original.close;
+        const start = original === null || original === void 0 ? void 0 : original.start;
+        const type = original === null || original === void 0 ? void 0 : original.type;
+        const write = original === null || original === void 0 ? void 0 : original.write;
+        return {
+            abort: abort === undefined ?
+                undefined :
+                convertUnderlyingSinkAbortCallback(abort, original, `${context} has member 'abort' that`),
+            close: close === undefined ?
+                undefined :
+                convertUnderlyingSinkCloseCallback(close, original, `${context} has member 'close' that`),
+            start: start === undefined ?
+                undefined :
+                convertUnderlyingSinkStartCallback(start, original, `${context} has member 'start' that`),
+            write: write === undefined ?
+                undefined :
+                convertUnderlyingSinkWriteCallback(write, original, `${context} has member 'write' that`),
+            type
+        };
+    }
+    function convertUnderlyingSinkAbortCallback(fn, original, context) {
+        assertFunction(fn, context);
+        return (reason) => promiseCall(fn, original, [reason]);
+    }
+    function convertUnderlyingSinkCloseCallback(fn, original, context) {
+        assertFunction(fn, context);
+        return () => promiseCall(fn, original, []);
+    }
+    function convertUnderlyingSinkStartCallback(fn, original, context) {
+        assertFunction(fn, context);
+        return (controller) => reflectCall(fn, original, [controller]);
+    }
+    function convertUnderlyingSinkWriteCallback(fn, original, context) {
+        assertFunction(fn, context);
+        return (chunk, controller) => promiseCall(fn, original, [chunk, controller]);
+    }
+
+    function assertWritableStream(x, context) {
+        if (!IsWritableStream(x)) {
+            throw new TypeError(`${context} is not a WritableStream.`);
+        }
+    }
+
+    function isAbortSignal(value) {
+        if (typeof value !== 'object' || value === null) {
+            return false;
+        }
+        try {
+            return typeof value.aborted === 'boolean';
+        }
+        catch (_a) {
+            // AbortSignal.prototype.aborted throws if its brand check fails
+            return false;
+        }
+    }
+    const supportsAbortController = typeof AbortController === 'function';
+    /**
+     * Construct a new AbortController, if supported by the platform.
+     *
+     * @internal
+     */
+    function createAbortController() {
+        if (supportsAbortController) {
+            return new AbortController();
+        }
+        return undefined;
+    }
+
+    /**
+     * A writable stream represents a destination for data, into which you can write.
+     *
+     * @public
+     */
+    class WritableStream {
+        constructor(rawUnderlyingSink = {}, rawStrategy = {}) {
+            if (rawUnderlyingSink === undefined) {
+                rawUnderlyingSink = null;
+            }
+            else {
+                assertObject(rawUnderlyingSink, 'First parameter');
+            }
+            const strategy = convertQueuingStrategy(rawStrategy, 'Second parameter');
+            const underlyingSink = convertUnderlyingSink(rawUnderlyingSink, 'First parameter');
+            InitializeWritableStream(this);
+            const type = underlyingSink.type;
+            if (type !== undefined) {
+                throw new RangeError('Invalid type is specified');
+            }
+            const sizeAlgorithm = ExtractSizeAlgorithm(strategy);
+            const highWaterMark = ExtractHighWaterMark(strategy, 1);
+            SetUpWritableStreamDefaultControllerFromUnderlyingSink(this, underlyingSink, highWaterMark, sizeAlgorithm);
+        }
+        /**
+         * Returns whether or not the writable stream is locked to a writer.
+         */
+        get locked() {
+            if (!IsWritableStream(this)) {
+                throw streamBrandCheckException$2('locked');
+            }
+            return IsWritableStreamLocked(this);
+        }
+        /**
+         * Aborts the stream, signaling that the producer can no longer successfully write to the stream and it is to be
+         * immediately moved to an errored state, with any queued-up writes discarded. This will also execute any abort
+         * mechanism of the underlying sink.
+         *
+         * The returned promise will fulfill if the stream shuts down successfully, or reject if the underlying sink signaled
+         * that there was an error doing so. Additionally, it will reject with a `TypeError` (without attempting to cancel
+         * the stream) if the stream is currently locked.
+         */
+        abort(reason = undefined) {
+            if (!IsWritableStream(this)) {
+                return promiseRejectedWith(streamBrandCheckException$2('abort'));
+            }
+            if (IsWritableStreamLocked(this)) {
+                return promiseRejectedWith(new TypeError('Cannot abort a stream that already has a writer'));
+            }
+            return WritableStreamAbort(this, reason);
+        }
+        /**
+         * Closes the stream. The underlying sink will finish processing any previously-written chunks, before invoking its
+         * close behavior. During this time any further attempts to write will fail (without erroring the stream).
+         *
+         * The method returns a promise that will fulfill if all remaining chunks are successfully written and the stream
+         * successfully closes, or rejects if an error is encountered during this process. Additionally, it will reject with
+         * a `TypeError` (without attempting to cancel the stream) if the stream is currently locked.
+         */
+        close() {
+            if (!IsWritableStream(this)) {
+                return promiseRejectedWith(streamBrandCheckException$2('close'));
+            }
+            if (IsWritableStreamLocked(this)) {
+                return promiseRejectedWith(new TypeError('Cannot close a stream that already has a writer'));
+            }
+            if (WritableStreamCloseQueuedOrInFlight(this)) {
+                return promiseRejectedWith(new TypeError('Cannot close an already-closing stream'));
+            }
+            return WritableStreamClose(this);
+        }
+        /**
+         * Creates a {@link WritableStreamDefaultWriter | writer} and locks the stream to the new writer. While the stream
+         * is locked, no other writer can be acquired until this one is released.
+         *
+         * This functionality is especially useful for creating abstractions that desire the ability to write to a stream
+         * without interruption or interleaving. By getting a writer for the stream, you can ensure nobody else can write at
+         * the same time, which would cause the resulting written data to be unpredictable and probably useless.
+         */
+        getWriter() {
+            if (!IsWritableStream(this)) {
+                throw streamBrandCheckException$2('getWriter');
+            }
+            return AcquireWritableStreamDefaultWriter(this);
+        }
+    }
+    Object.defineProperties(WritableStream.prototype, {
+        abort: { enumerable: true },
+        close: { enumerable: true },
+        getWriter: { enumerable: true },
+        locked: { enumerable: true }
+    });
+    if (typeof SymbolPolyfill.toStringTag === 'symbol') {
+        Object.defineProperty(WritableStream.prototype, SymbolPolyfill.toStringTag, {
+            value: 'WritableStream',
+            configurable: true
+        });
+    }
+    // Abstract operations for the WritableStream.
+    function AcquireWritableStreamDefaultWriter(stream) {
+        return new WritableStreamDefaultWriter(stream);
+    }
+    // Throws if and only if startAlgorithm throws.
+    function CreateWritableStream(startAlgorithm, writeAlgorithm, closeAlgorithm, abortAlgorithm, highWaterMark = 1, sizeAlgorithm = () => 1) {
+        const stream = Object.create(WritableStream.prototype);
+        InitializeWritableStream(stream);
+        const controller = Object.create(WritableStreamDefaultController.prototype);
+        SetUpWritableStreamDefaultController(stream, controller, startAlgorithm, writeAlgorithm, closeAlgorithm, abortAlgorithm, highWaterMark, sizeAlgorithm);
+        return stream;
+    }
+    function InitializeWritableStream(stream) {
+        stream._state = 'writable';
+        // The error that will be reported by new method calls once the state becomes errored. Only set when [[state]] is
+        // 'erroring' or 'errored'. May be set to an undefined value.
+        stream._storedError = undefined;
+        stream._writer = undefined;
+        // Initialize to undefined first because the constructor of the controller checks this
+        // variable to validate the caller.
+        stream._writableStreamController = undefined;
+        // This queue is placed here instead of the writer class in order to allow for passing a writer to the next data
+        // producer without waiting for the queued writes to finish.
+        stream._writeRequests = new SimpleQueue();
+        // Write requests are removed from _writeRequests when write() is called on the underlying sink. This prevents
+        // them from being erroneously rejected on error. If a write() call is in-flight, the request is stored here.
+        stream._inFlightWriteRequest = undefined;
+        // The promise that was returned from writer.close(). Stored here because it may be fulfilled after the writer
+        // has been detached.
+        stream._closeRequest = undefined;
+        // Close request is removed from _closeRequest when close() is called on the underlying sink. This prevents it
+        // from being erroneously rejected on error. If a close() call is in-flight, the request is stored here.
+        stream._inFlightCloseRequest = undefined;
+        // The promise that was returned from writer.abort(). This may also be fulfilled after the writer has detached.
+        stream._pendingAbortRequest = undefined;
+        // The backpressure signal set by the controller.
+        stream._backpressure = false;
+    }
+    function IsWritableStream(x) {
+        if (!typeIsObject(x)) {
+            return false;
+        }
+        if (!Object.prototype.hasOwnProperty.call(x, '_writableStreamController')) {
+            return false;
+        }
+        return x instanceof WritableStream;
+    }
+    function IsWritableStreamLocked(stream) {
+        if (stream._writer === undefined) {
+            return false;
+        }
+        return true;
+    }
+    function WritableStreamAbort(stream, reason) {
+        var _a;
+        if (stream._state === 'closed' || stream._state === 'errored') {
+            return promiseResolvedWith(undefined);
+        }
+        stream._writableStreamController._abortReason = reason;
+        (_a = stream._writableStreamController._abortController) === null || _a === void 0 ? void 0 : _a.abort();
+        // TypeScript narrows the type of `stream._state` down to 'writable' | 'erroring',
+        // but it doesn't know that signaling abort runs author code that might have changed the state.
+        // Widen the type again by casting to WritableStreamState.
+        const state = stream._state;
+        if (state === 'closed' || state === 'errored') {
+            return promiseResolvedWith(undefined);
+        }
+        if (stream._pendingAbortRequest !== undefined) {
+            return stream._pendingAbortRequest._promise;
+        }
+        let wasAlreadyErroring = false;
+        if (state === 'erroring') {
+            wasAlreadyErroring = true;
+            // reason will not be used, so don't keep a reference to it.
+            reason = undefined;
+        }
+        const promise = newPromise((resolve, reject) => {
+            stream._pendingAbortRequest = {
+                _promise: undefined,
+                _resolve: resolve,
+                _reject: reject,
+                _reason: reason,
+                _wasAlreadyErroring: wasAlreadyErroring
+            };
+        });
+        stream._pendingAbortRequest._promise = promise;
+        if (!wasAlreadyErroring) {
+            WritableStreamStartErroring(stream, reason);
+        }
+        return promise;
+    }
+    function WritableStreamClose(stream) {
+        const state = stream._state;
+        if (state === 'closed' || state === 'errored') {
+            return promiseRejectedWith(new TypeError(`The stream (in ${state} state) is not in the writable state and cannot be closed`));
+        }
+        const promise = newPromise((resolve, reject) => {
+            const closeRequest = {
+                _resolve: resolve,
+                _reject: reject
+            };
+            stream._closeRequest = closeRequest;
+        });
+        const writer = stream._writer;
+        if (writer !== undefined && stream._backpressure && state === 'writable') {
+            defaultWriterReadyPromiseResolve(writer);
+        }
+        WritableStreamDefaultControllerClose(stream._writableStreamController);
+        return promise;
+    }
+    // WritableStream API exposed for controllers.
+    function WritableStreamAddWriteRequest(stream) {
+        const promise = newPromise((resolve, reject) => {
+            const writeRequest = {
+                _resolve: resolve,
+                _reject: reject
+            };
+            stream._writeRequests.push(writeRequest);
+        });
+        return promise;
+    }
+    function WritableStreamDealWithRejection(stream, error) {
+        const state = stream._state;
+        if (state === 'writable') {
+            WritableStreamStartErroring(stream, error);
+            return;
+        }
+        WritableStreamFinishErroring(stream);
+    }
+    function WritableStreamStartErroring(stream, reason) {
+        const controller = stream._writableStreamController;
+        stream._state = 'erroring';
+        stream._storedError = reason;
+        const writer = stream._writer;
+        if (writer !== undefined) {
+            WritableStreamDefaultWriterEnsureReadyPromiseRejected(writer, reason);
+        }
+        if (!WritableStreamHasOperationMarkedInFlight(stream) && controller._started) {
+            WritableStreamFinishErroring(stream);
+        }
+    }
+    function WritableStreamFinishErroring(stream) {
+        stream._state = 'errored';
+        stream._writableStreamController[ErrorSteps]();
+        const storedError = stream._storedError;
+        stream._writeRequests.forEach(writeRequest => {
+            writeRequest._reject(storedError);
+        });
+        stream._writeRequests = new SimpleQueue();
+        if (stream._pendingAbortRequest === undefined) {
+            WritableStreamRejectCloseAndClosedPromiseIfNeeded(stream);
+            return;
+        }
+        const abortRequest = stream._pendingAbortRequest;
+        stream._pendingAbortRequest = undefined;
+        if (abortRequest._wasAlreadyErroring) {
+            abortRequest._reject(storedError);
+            WritableStreamRejectCloseAndClosedPromiseIfNeeded(stream);
+            return;
+        }
+        const promise = stream._writableStreamController[AbortSteps](abortRequest._reason);
+        uponPromise(promise, () => {
+            abortRequest._resolve();
+            WritableStreamRejectCloseAndClosedPromiseIfNeeded(stream);
+        }, (reason) => {
+            abortRequest._reject(reason);
+            WritableStreamRejectCloseAndClosedPromiseIfNeeded(stream);
+        });
+    }
+    function WritableStreamFinishInFlightWrite(stream) {
+        stream._inFlightWriteRequest._resolve(undefined);
+        stream._inFlightWriteRequest = undefined;
+    }
+    function WritableStreamFinishInFlightWriteWithError(stream, error) {
+        stream._inFlightWriteRequest._reject(error);
+        stream._inFlightWriteRequest = undefined;
+        WritableStreamDealWithRejection(stream, error);
+    }
+    function WritableStreamFinishInFlightClose(stream) {
+        stream._inFlightCloseRequest._resolve(undefined);
+        stream._inFlightCloseRequest = undefined;
+        const state = stream._state;
+        if (state === 'erroring') {
+            // The error was too late to do anything, so it is ignored.
+            stream._storedError = undefined;
+            if (stream._pendingAbortRequest !== undefined) {
+                stream._pendingAbortRequest._resolve();
+                stream._pendingAbortRequest = undefined;
+            }
+        }
+        stream._state = 'closed';
+        const writer = stream._writer;
+        if (writer !== undefined) {
+            defaultWriterClosedPromiseResolve(writer);
+        }
+    }
+    function WritableStreamFinishInFlightCloseWithError(stream, error) {
+        stream._inFlightCloseRequest._reject(error);
+        stream._inFlightCloseRequest = undefined;
+        // Never execute sink abort() after sink close().
+        if (stream._pendingAbortRequest !== undefined) {
+            stream._pendingAbortRequest._reject(error);
+            stream._pendingAbortRequest = undefined;
+        }
+        WritableStreamDealWithRejection(stream, error);
+    }
+    // TODO(ricea): Fix alphabetical order.
+    function WritableStreamCloseQueuedOrInFlight(stream) {
+        if (stream._closeRequest === undefined && stream._inFlightCloseRequest === undefined) {
+            return false;
+        }
+        return true;
+    }
+    function WritableStreamHasOperationMarkedInFlight(stream) {
+        if (stream._inFlightWriteRequest === undefined && stream._inFlightCloseRequest === undefined) {
+            return false;
+        }
+        return true;
+    }
+    function WritableStreamMarkCloseRequestInFlight(stream) {
+        stream._inFlightCloseRequest = stream._closeRequest;
+        stream._closeRequest = undefined;
+    }
+    function WritableStreamMarkFirstWriteRequestInFlight(stream) {
+        stream._inFlightWriteRequest = stream._writeRequests.shift();
+    }
+    function WritableStreamRejectCloseAndClosedPromiseIfNeeded(stream) {
+        if (stream._closeRequest !== undefined) {
+            stream._closeRequest._reject(stream._storedError);
+            stream._closeRequest = undefined;
+        }
+        const writer = stream._writer;
+        if (writer !== undefined) {
+            defaultWriterClosedPromiseReject(writer, stream._storedError);
+        }
+    }
+    function WritableStreamUpdateBackpressure(stream, backpressure) {
+        const writer = stream._writer;
+        if (writer !== undefined && backpressure !== stream._backpressure) {
+            if (backpressure) {
+                defaultWriterReadyPromiseReset(writer);
+            }
+            else {
+                defaultWriterReadyPromiseResolve(writer);
+            }
+        }
+        stream._backpressure = backpressure;
+    }
+    /**
+     * A default writer vended by a {@link WritableStream}.
+     *
+     * @public
+     */
+    class WritableStreamDefaultWriter {
+        constructor(stream) {
+            assertRequiredArgument(stream, 1, 'WritableStreamDefaultWriter');
+            assertWritableStream(stream, 'First parameter');
+            if (IsWritableStreamLocked(stream)) {
+                throw new TypeError('This stream has already been locked for exclusive writing by another writer');
+            }
+            this._ownerWritableStream = stream;
+            stream._writer = this;
+            const state = stream._state;
+            if (state === 'writable') {
+                if (!WritableStreamCloseQueuedOrInFlight(stream) && stream._backpressure) {
+                    defaultWriterReadyPromiseInitialize(this);
+                }
+                else {
+                    defaultWriterReadyPromiseInitializeAsResolved(this);
+                }
+                defaultWriterClosedPromiseInitialize(this);
+            }
+            else if (state === 'erroring') {
+                defaultWriterReadyPromiseInitializeAsRejected(this, stream._storedError);
+                defaultWriterClosedPromiseInitialize(this);
+            }
+            else if (state === 'closed') {
+                defaultWriterReadyPromiseInitializeAsResolved(this);
+                defaultWriterClosedPromiseInitializeAsResolved(this);
+            }
+            else {
+                const storedError = stream._storedError;
+                defaultWriterReadyPromiseInitializeAsRejected(this, storedError);
+                defaultWriterClosedPromiseInitializeAsRejected(this, storedError);
+            }
+        }
+        /**
+         * Returns a promise that will be fulfilled when the stream becomes closed, or rejected if the stream ever errors or
+         * the writer’s lock is released before the stream finishes closing.
+         */
+        get closed() {
+            if (!IsWritableStreamDefaultWriter(this)) {
+                return promiseRejectedWith(defaultWriterBrandCheckException('closed'));
+            }
+            return this._closedPromise;
+        }
+        /**
+         * Returns the desired size to fill the stream’s internal queue. It can be negative, if the queue is over-full.
+         * A producer can use this information to determine the right amount of data to write.
+         *
+         * It will be `null` if the stream cannot be successfully written to (due to either being errored, or having an abort
+         * queued up). It will return zero if the stream is closed. And the getter will throw an exception if invoked when
+         * the writer’s lock is released.
+         */
+        get desiredSize() {
+            if (!IsWritableStreamDefaultWriter(this)) {
+                throw defaultWriterBrandCheckException('desiredSize');
+            }
+            if (this._ownerWritableStream === undefined) {
+                throw defaultWriterLockException('desiredSize');
+            }
+            return WritableStreamDefaultWriterGetDesiredSize(this);
+        }
+        /**
+         * Returns a promise that will be fulfilled when the desired size to fill the stream’s internal queue transitions
+         * from non-positive to positive, signaling that it is no longer applying backpressure. Once the desired size dips
+         * back to zero or below, the getter will return a new promise that stays pending until the next transition.
+         *
+         * If the stream becomes errored or aborted, or the writer’s lock is released, the returned promise will become
+         * rejected.
+         */
+        get ready() {
+            if (!IsWritableStreamDefaultWriter(this)) {
+                return promiseRejectedWith(defaultWriterBrandCheckException('ready'));
+            }
+            return this._readyPromise;
+        }
+        /**
+         * If the reader is active, behaves the same as {@link WritableStream.abort | stream.abort(reason)}.
+         */
+        abort(reason = undefined) {
+            if (!IsWritableStreamDefaultWriter(this)) {
+                return promiseRejectedWith(defaultWriterBrandCheckException('abort'));
+            }
+            if (this._ownerWritableStream === undefined) {
+                return promiseRejectedWith(defaultWriterLockException('abort'));
+            }
+            return WritableStreamDefaultWriterAbort(this, reason);
+        }
+        /**
+         * If the reader is active, behaves the same as {@link WritableStream.close | stream.close()}.
+         */
+        close() {
+            if (!IsWritableStreamDefaultWriter(this)) {
+                return promiseRejectedWith(defaultWriterBrandCheckException('close'));
+            }
+            const stream = this._ownerWritableStream;
+            if (stream === undefined) {
+                return promiseRejectedWith(defaultWriterLockException('close'));
+            }
+            if (WritableStreamCloseQueuedOrInFlight(stream)) {
+                return promiseRejectedWith(new TypeError('Cannot close an already-closing stream'));
+            }
+            return WritableStreamDefaultWriterClose(this);
+        }
+        /**
+         * Releases the writer’s lock on the corresponding stream. After the lock is released, the writer is no longer active.
+         * If the associated stream is errored when the lock is released, the writer will appear errored in the same way from
+         * now on; otherwise, the writer will appear closed.
+         *
+         * Note that the lock can still be released even if some ongoing writes have not yet finished (i.e. even if the
+         * promises returned from previous calls to {@link WritableStreamDefaultWriter.write | write()} have not yet settled).
+         * It’s not necessary to hold the lock on the writer for the duration of the write; the lock instead simply prevents
+         * other producers from writing in an interleaved manner.
+         */
+        releaseLock() {
+            if (!IsWritableStreamDefaultWriter(this)) {
+                throw defaultWriterBrandCheckException('releaseLock');
+            }
+            const stream = this._ownerWritableStream;
+            if (stream === undefined) {
+                return;
+            }
+            WritableStreamDefaultWriterRelease(this);
+        }
+        write(chunk = undefined) {
+            if (!IsWritableStreamDefaultWriter(this)) {
+                return promiseRejectedWith(defaultWriterBrandCheckException('write'));
+            }
+            if (this._ownerWritableStream === undefined) {
+                return promiseRejectedWith(defaultWriterLockException('write to'));
+            }
+            return WritableStreamDefaultWriterWrite(this, chunk);
+        }
+    }
+    Object.defineProperties(WritableStreamDefaultWriter.prototype, {
+        abort: { enumerable: true },
+        close: { enumerable: true },
+        releaseLock: { enumerable: true },
+        write: { enumerable: true },
+        closed: { enumerable: true },
+        desiredSize: { enumerable: true },
+        ready: { enumerable: true }
+    });
+    if (typeof SymbolPolyfill.toStringTag === 'symbol') {
+        Object.defineProperty(WritableStreamDefaultWriter.prototype, SymbolPolyfill.toStringTag, {
+            value: 'WritableStreamDefaultWriter',
+            configurable: true
+        });
+    }
+    // Abstract operations for the WritableStreamDefaultWriter.
+    function IsWritableStreamDefaultWriter(x) {
+        if (!typeIsObject(x)) {
+            return false;
+        }
+        if (!Object.prototype.hasOwnProperty.call(x, '_ownerWritableStream')) {
+            return false;
+        }
+        return x instanceof WritableStreamDefaultWriter;
+    }
+    // A client of WritableStreamDefaultWriter may use these functions directly to bypass state check.
+    function WritableStreamDefaultWriterAbort(writer, reason) {
+        const stream = writer._ownerWritableStream;
+        return WritableStreamAbort(stream, reason);
+    }
+    function WritableStreamDefaultWriterClose(writer) {
+        const stream = writer._ownerWritableStream;
+        return WritableStreamClose(stream);
+    }
+    function WritableStreamDefaultWriterCloseWithErrorPropagation(writer) {
+        const stream = writer._ownerWritableStream;
+        const state = stream._state;
+        if (WritableStreamCloseQueuedOrInFlight(stream) || state === 'closed') {
+            return promiseResolvedWith(undefined);
+        }
+        if (state === 'errored') {
+            return promiseRejectedWith(stream._storedError);
+        }
+        return WritableStreamDefaultWriterClose(writer);
+    }
+    function WritableStreamDefaultWriterEnsureClosedPromiseRejected(writer, error) {
+        if (writer._closedPromiseState === 'pending') {
+            defaultWriterClosedPromiseReject(writer, error);
+        }
+        else {
+            defaultWriterClosedPromiseResetToRejected(writer, error);
+        }
+    }
+    function WritableStreamDefaultWriterEnsureReadyPromiseRejected(writer, error) {
+        if (writer._readyPromiseState === 'pending') {
+            defaultWriterReadyPromiseReject(writer, error);
+        }
+        else {
+            defaultWriterReadyPromiseResetToRejected(writer, error);
+        }
+    }
+    function WritableStreamDefaultWriterGetDesiredSize(writer) {
+        const stream = writer._ownerWritableStream;
+        const state = stream._state;
+        if (state === 'errored' || state === 'erroring') {
+            return null;
+        }
+        if (state === 'closed') {
+            return 0;
+        }
+        return WritableStreamDefaultControllerGetDesiredSize(stream._writableStreamController);
+    }
+    function WritableStreamDefaultWriterRelease(writer) {
+        const stream = writer._ownerWritableStream;
+        const releasedError = new TypeError(`Writer was released and can no longer be used to monitor the stream's closedness`);
+        WritableStreamDefaultWriterEnsureReadyPromiseRejected(writer, releasedError);
+        // The state transitions to "errored" before the sink abort() method runs, but the writer.closed promise is not
+        // rejected until afterwards. This means that simply testing state will not work.
+        WritableStreamDefaultWriterEnsureClosedPromiseRejected(writer, releasedError);
+        stream._writer = undefined;
+        writer._ownerWritableStream = undefined;
+    }
+    function WritableStreamDefaultWriterWrite(writer, chunk) {
+        const stream = writer._ownerWritableStream;
+        const controller = stream._writableStreamController;
+        const chunkSize = WritableStreamDefaultControllerGetChunkSize(controller, chunk);
+        if (stream !== writer._ownerWritableStream) {
+            return promiseRejectedWith(defaultWriterLockException('write to'));
+        }
+        const state = stream._state;
+        if (state === 'errored') {
+            return promiseRejectedWith(stream._storedError);
+        }
+        if (WritableStreamCloseQueuedOrInFlight(stream) || state === 'closed') {
+            return promiseRejectedWith(new TypeError('The stream is closing or closed and cannot be written to'));
+        }
+        if (state === 'erroring') {
+            return promiseRejectedWith(stream._storedError);
+        }
+        const promise = WritableStreamAddWriteRequest(stream);
+        WritableStreamDefaultControllerWrite(controller, chunk, chunkSize);
+        return promise;
+    }
+    const closeSentinel = {};
+    /**
+     * Allows control of a {@link WritableStream | writable stream}'s state and internal queue.
+     *
+     * @public
+     */
+    class WritableStreamDefaultController {
+        constructor() {
+            throw new TypeError('Illegal constructor');
+        }
+        /**
+         * The reason which was passed to `WritableStream.abort(reason)` when the stream was aborted.
+         *
+         * @deprecated
+         *  This property has been removed from the specification, see https://github.com/whatwg/streams/pull/1177.
+         *  Use {@link WritableStreamDefaultController.signal}'s `reason` instead.
+         */
+        get abortReason() {
+            if (!IsWritableStreamDefaultController(this)) {
+                throw defaultControllerBrandCheckException$2('abortReason');
+            }
+            return this._abortReason;
+        }
+        /**
+         * An `AbortSignal` that can be used to abort the pending write or close operation when the stream is aborted.
+         */
+        get signal() {
+            if (!IsWritableStreamDefaultController(this)) {
+                throw defaultControllerBrandCheckException$2('signal');
+            }
+            if (this._abortController === undefined) {
+                // Older browsers or older Node versions may not support `AbortController` or `AbortSignal`.
+                // We don't want to bundle and ship an `AbortController` polyfill together with our polyfill,
+                // so instead we only implement support for `signal` if we find a global `AbortController` constructor.
+                throw new TypeError('WritableStreamDefaultController.prototype.signal is not supported');
+            }
+            return this._abortController.signal;
+        }
+        /**
+         * Closes the controlled writable stream, making all future interactions with it fail with the given error `e`.
+         *
+         * This method is rarely used, since usually it suffices to return a rejected promise from one of the underlying
+         * sink's methods. However, it can be useful for suddenly shutting down a stream in response to an event outside the
+         * normal lifecycle of interactions with the underlying sink.
+         */
+        error(e = undefined) {
+            if (!IsWritableStreamDefaultController(this)) {
+                throw defaultControllerBrandCheckException$2('error');
+            }
+            const state = this._controlledWritableStream._state;
+            if (state !== 'writable') {
+                // The stream is closed, errored or will be soon. The sink can't do anything useful if it gets an error here, so
+                // just treat it as a no-op.
+                return;
+            }
+            WritableStreamDefaultControllerError(this, e);
+        }
+        /** @internal */
+        [AbortSteps](reason) {
+            const result = this._abortAlgorithm(reason);
+            WritableStreamDefaultControllerClearAlgorithms(this);
+            return result;
+        }
+        /** @internal */
+        [ErrorSteps]() {
+            ResetQueue(this);
+        }
+    }
+    Object.defineProperties(WritableStreamDefaultController.prototype, {
+        abortReason: { enumerable: true },
+        signal: { enumerable: true },
+        error: { enumerable: true }
+    });
+    if (typeof SymbolPolyfill.toStringTag === 'symbol') {
+        Object.defineProperty(WritableStreamDefaultController.prototype, SymbolPolyfill.toStringTag, {
+            value: 'WritableStreamDefaultController',
+            configurable: true
+        });
+    }
+    // Abstract operations implementing interface required by the WritableStream.
+    function IsWritableStreamDefaultController(x) {
+        if (!typeIsObject(x)) {
+            return false;
+        }
+        if (!Object.prototype.hasOwnProperty.call(x, '_controlledWritableStream')) {
+            return false;
+        }
+        return x instanceof WritableStreamDefaultController;
+    }
+    function SetUpWritableStreamDefaultController(stream, controller, startAlgorithm, writeAlgorithm, closeAlgorithm, abortAlgorithm, highWaterMark, sizeAlgorithm) {
+        controller._controlledWritableStream = stream;
+        stream._writableStreamController = controller;
+        // Need to set the slots so that the assert doesn't fire. In the spec the slots already exist implicitly.
+        controller._queue = undefined;
+        controller._queueTotalSize = undefined;
+        ResetQueue(controller);
+        controller._abortReason = undefined;
+        controller._abortController = createAbortController();
+        controller._started = false;
+        controller._strategySizeAlgorithm = sizeAlgorithm;
+        controller._strategyHWM = highWaterMark;
+        controller._writeAlgorithm = writeAlgorithm;
+        controller._closeAlgorithm = closeAlgorithm;
+        controller._abortAlgorithm = abortAlgorithm;
+        const backpressure = WritableStreamDefaultControllerGetBackpressure(controller);
+        WritableStreamUpdateBackpressure(stream, backpressure);
+        const startResult = startAlgorithm();
+        const startPromise = promiseResolvedWith(startResult);
+        uponPromise(startPromise, () => {
+            controller._started = true;
+            WritableStreamDefaultControllerAdvanceQueueIfNeeded(controller);
+        }, r => {
+            controller._started = true;
+            WritableStreamDealWithRejection(stream, r);
+        });
+    }
+    function SetUpWritableStreamDefaultControllerFromUnderlyingSink(stream, underlyingSink, highWaterMark, sizeAlgorithm) {
+        const controller = Object.create(WritableStreamDefaultController.prototype);
+        let startAlgorithm = () => undefined;
+        let writeAlgorithm = () => promiseResolvedWith(undefined);
+        let closeAlgorithm = () => promiseResolvedWith(undefined);
+        let abortAlgorithm = () => promiseResolvedWith(undefined);
+        if (underlyingSink.start !== undefined) {
+            startAlgorithm = () => underlyingSink.start(controller);
+        }
+        if (underlyingSink.write !== undefined) {
+            writeAlgorithm = chunk => underlyingSink.write(chunk, controller);
+        }
+        if (underlyingSink.close !== undefined) {
+            closeAlgorithm = () => underlyingSink.close();
+        }
+        if (underlyingSink.abort !== undefined) {
+            abortAlgorithm = reason => underlyingSink.abort(reason);
+        }
+        SetUpWritableStreamDefaultController(stream, controller, startAlgorithm, writeAlgorithm, closeAlgorithm, abortAlgorithm, highWaterMark, sizeAlgorithm);
+    }
+    // ClearAlgorithms may be called twice. Erroring the same stream in multiple ways will often result in redundant calls.
+    function WritableStreamDefaultControllerClearAlgorithms(controller) {
+        controller._writeAlgorithm = undefined;
+        controller._closeAlgorithm = undefined;
+        controller._abortAlgorithm = undefined;
+        controller._strategySizeAlgorithm = undefined;
+    }
+    function WritableStreamDefaultControllerClose(controller) {
+        EnqueueValueWithSize(controller, closeSentinel, 0);
+        WritableStreamDefaultControllerAdvanceQueueIfNeeded(controller);
+    }
+    function WritableStreamDefaultControllerGetChunkSize(controller, chunk) {
+        try {
+            return controller._strategySizeAlgorithm(chunk);
+        }
+        catch (chunkSizeE) {
+            WritableStreamDefaultControllerErrorIfNeeded(controller, chunkSizeE);
+            return 1;
+        }
+    }
+    function WritableStreamDefaultControllerGetDesiredSize(controller) {
+        return controller._strategyHWM - controller._queueTotalSize;
+    }
+    function WritableStreamDefaultControllerWrite(controller, chunk, chunkSize) {
+        try {
+            EnqueueValueWithSize(controller, chunk, chunkSize);
+        }
+        catch (enqueueE) {
+            WritableStreamDefaultControllerErrorIfNeeded(controller, enqueueE);
+            return;
+        }
+        const stream = controller._controlledWritableStream;
+        if (!WritableStreamCloseQueuedOrInFlight(stream) && stream._state === 'writable') {
+            const backpressure = WritableStreamDefaultControllerGetBackpressure(controller);
+            WritableStreamUpdateBackpressure(stream, backpressure);
+        }
+        WritableStreamDefaultControllerAdvanceQueueIfNeeded(controller);
+    }
+    // Abstract operations for the WritableStreamDefaultController.
+    function WritableStreamDefaultControllerAdvanceQueueIfNeeded(controller) {
+        const stream = controller._controlledWritableStream;
+        if (!controller._started) {
+            return;
+        }
+        if (stream._inFlightWriteRequest !== undefined) {
+            return;
+        }
+        const state = stream._state;
+        if (state === 'erroring') {
+            WritableStreamFinishErroring(stream);
+            return;
+        }
+        if (controller._queue.length === 0) {
+            return;
+        }
+        const value = PeekQueueValue(controller);
+        if (value === closeSentinel) {
+            WritableStreamDefaultControllerProcessClose(controller);
+        }
+        else {
+            WritableStreamDefaultControllerProcessWrite(controller, value);
+        }
+    }
+    function WritableStreamDefaultControllerErrorIfNeeded(controller, error) {
+        if (controller._controlledWritableStream._state === 'writable') {
+            WritableStreamDefaultControllerError(controller, error);
+        }
+    }
+    function WritableStreamDefaultControllerProcessClose(controller) {
+        const stream = controller._controlledWritableStream;
+        WritableStreamMarkCloseRequestInFlight(stream);
+        DequeueValue(controller);
+        const sinkClosePromise = controller._closeAlgorithm();
+        WritableStreamDefaultControllerClearAlgorithms(controller);
+        uponPromise(sinkClosePromise, () => {
+            WritableStreamFinishInFlightClose(stream);
+        }, reason => {
+            WritableStreamFinishInFlightCloseWithError(stream, reason);
+        });
+    }
+    function WritableStreamDefaultControllerProcessWrite(controller, chunk) {
+        const stream = controller._controlledWritableStream;
+        WritableStreamMarkFirstWriteRequestInFlight(stream);
+        const sinkWritePromise = controller._writeAlgorithm(chunk);
+        uponPromise(sinkWritePromise, () => {
+            WritableStreamFinishInFlightWrite(stream);
+            const state = stream._state;
+            DequeueValue(controller);
+            if (!WritableStreamCloseQueuedOrInFlight(stream) && state === 'writable') {
+                const backpressure = WritableStreamDefaultControllerGetBackpressure(controller);
+                WritableStreamUpdateBackpressure(stream, backpressure);
+            }
+            WritableStreamDefaultControllerAdvanceQueueIfNeeded(controller);
+        }, reason => {
+            if (stream._state === 'writable') {
+                WritableStreamDefaultControllerClearAlgorithms(controller);
+            }
+            WritableStreamFinishInFlightWriteWithError(stream, reason);
+        });
+    }
+    function WritableStreamDefaultControllerGetBackpressure(controller) {
+        const desiredSize = WritableStreamDefaultControllerGetDesiredSize(controller);
+        return desiredSize <= 0;
+    }
+    // A client of WritableStreamDefaultController may use these functions directly to bypass state check.
+    function WritableStreamDefaultControllerError(controller, error) {
+        const stream = controller._controlledWritableStream;
+        WritableStreamDefaultControllerClearAlgorithms(controller);
+        WritableStreamStartErroring(stream, error);
+    }
+    // Helper functions for the WritableStream.
+    function streamBrandCheckException$2(name) {
+        return new TypeError(`WritableStream.prototype.${name} can only be used on a WritableStream`);
+    }
+    // Helper functions for the WritableStreamDefaultController.
+    function defaultControllerBrandCheckException$2(name) {
+        return new TypeError(`WritableStreamDefaultController.prototype.${name} can only be used on a WritableStreamDefaultController`);
+    }
+    // Helper functions for the WritableStreamDefaultWriter.
+    function defaultWriterBrandCheckException(name) {
+        return new TypeError(`WritableStreamDefaultWriter.prototype.${name} can only be used on a WritableStreamDefaultWriter`);
+    }
+    function defaultWriterLockException(name) {
+        return new TypeError('Cannot ' + name + ' a stream using a released writer');
+    }
+    function defaultWriterClosedPromiseInitialize(writer) {
+        writer._closedPromise = newPromise((resolve, reject) => {
+            writer._closedPromise_resolve = resolve;
+            writer._closedPromise_reject = reject;
+            writer._closedPromiseState = 'pending';
+        });
+    }
+    function defaultWriterClosedPromiseInitializeAsRejected(writer, reason) {
+        defaultWriterClosedPromiseInitialize(writer);
+        defaultWriterClosedPromiseReject(writer, reason);
+    }
+    function defaultWriterClosedPromiseInitializeAsResolved(writer) {
+        defaultWriterClosedPromiseInitialize(writer);
+        defaultWriterClosedPromiseResolve(writer);
+    }
+    function defaultWriterClosedPromiseReject(writer, reason) {
+        if (writer._closedPromise_reject === undefined) {
+            return;
+        }
+        setPromiseIsHandledToTrue(writer._closedPromise);
+        writer._closedPromise_reject(reason);
+        writer._closedPromise_resolve = undefined;
+        writer._closedPromise_reject = undefined;
+        writer._closedPromiseState = 'rejected';
+    }
+    function defaultWriterClosedPromiseResetToRejected(writer, reason) {
+        defaultWriterClosedPromiseInitializeAsRejected(writer, reason);
+    }
+    function defaultWriterClosedPromiseResolve(writer) {
+        if (writer._closedPromise_resolve === undefined) {
+            return;
+        }
+        writer._closedPromise_resolve(undefined);
+        writer._closedPromise_resolve = undefined;
+        writer._closedPromise_reject = undefined;
+        writer._closedPromiseState = 'resolved';
+    }
+    function defaultWriterReadyPromiseInitialize(writer) {
+        writer._readyPromise = newPromise((resolve, reject) => {
+            writer._readyPromise_resolve = resolve;
+            writer._readyPromise_reject = reject;
+        });
+        writer._readyPromiseState = 'pending';
+    }
+    function defaultWriterReadyPromiseInitializeAsRejected(writer, reason) {
+        defaultWriterReadyPromiseInitialize(writer);
+        defaultWriterReadyPromiseReject(writer, reason);
+    }
+    function defaultWriterReadyPromiseInitializeAsResolved(writer) {
+        defaultWriterReadyPromiseInitialize(writer);
+        defaultWriterReadyPromiseResolve(writer);
+    }
+    function defaultWriterReadyPromiseReject(writer, reason) {
+        if (writer._readyPromise_reject === undefined) {
+            return;
+        }
+        setPromiseIsHandledToTrue(writer._readyPromise);
+        writer._readyPromise_reject(reason);
+        writer._readyPromise_resolve = undefined;
+        writer._readyPromise_reject = undefined;
+        writer._readyPromiseState = 'rejected';
+    }
+    function defaultWriterReadyPromiseReset(writer) {
+        defaultWriterReadyPromiseInitialize(writer);
+    }
+    function defaultWriterReadyPromiseResetToRejected(writer, reason) {
+        defaultWriterReadyPromiseInitializeAsRejected(writer, reason);
+    }
+    function defaultWriterReadyPromiseResolve(writer) {
+        if (writer._readyPromise_resolve === undefined) {
+            return;
+        }
+        writer._readyPromise_resolve(undefined);
+        writer._readyPromise_resolve = undefined;
+        writer._readyPromise_reject = undefined;
+        writer._readyPromiseState = 'fulfilled';
+    }
+
+    /// <reference lib="dom" />
+    const NativeDOMException = typeof DOMException !== 'undefined' ? DOMException : undefined;
+
+    /// <reference types="node" />
+    function isDOMExceptionConstructor(ctor) {
+        if (!(typeof ctor === 'function' || typeof ctor === 'object')) {
+            return false;
+        }
+        try {
+            new ctor();
+            return true;
+        }
+        catch (_a) {
+            return false;
+        }
+    }
+    function createDOMExceptionPolyfill() {
+        // eslint-disable-next-line no-shadow
+        const ctor = function DOMException(message, name) {
+            this.message = message || '';
+            this.name = name || 'Error';
+            if (Error.captureStackTrace) {
+                Error.captureStackTrace(this, this.constructor);
+            }
+        };
+        ctor.prototype = Object.create(Error.prototype);
+        Object.defineProperty(ctor.prototype, 'constructor', { value: ctor, writable: true, configurable: true });
+        return ctor;
+    }
+    // eslint-disable-next-line no-redeclare
+    const DOMException$1 = isDOMExceptionConstructor(NativeDOMException) ? NativeDOMException : createDOMExceptionPolyfill();
+
+    function ReadableStreamPipeTo(source, dest, preventClose, preventAbort, preventCancel, signal) {
+        const reader = AcquireReadableStreamDefaultReader(source);
+        const writer = AcquireWritableStreamDefaultWriter(dest);
+        source._disturbed = true;
+        let shuttingDown = false;
+        // This is used to keep track of the spec's requirement that we wait for ongoing writes during shutdown.
+        let currentWrite = promiseResolvedWith(undefined);
+        return newPromise((resolve, reject) => {
+            let abortAlgorithm;
+            if (signal !== undefined) {
+                abortAlgorithm = () => {
+                    const error = new DOMException$1('Aborted', 'AbortError');
+                    const actions = [];
+                    if (!preventAbort) {
+                        actions.push(() => {
+                            if (dest._state === 'writable') {
+                                return WritableStreamAbort(dest, error);
+                            }
+                            return promiseResolvedWith(undefined);
+                        });
+                    }
+                    if (!preventCancel) {
+                        actions.push(() => {
+                            if (source._state === 'readable') {
+                                return ReadableStreamCancel(source, error);
+                            }
+                            return promiseResolvedWith(undefined);
+                        });
+                    }
+                    shutdownWithAction(() => Promise.all(actions.map(action => action())), true, error);
+                };
+                if (signal.aborted) {
+                    abortAlgorithm();
+                    return;
+                }
+                signal.addEventListener('abort', abortAlgorithm);
+            }
+            // Using reader and writer, read all chunks from this and write them to dest
+            // - Backpressure must be enforced
+            // - Shutdown must stop all activity
+            function pipeLoop() {
+                return newPromise((resolveLoop, rejectLoop) => {
+                    function next(done) {
+                        if (done) {
+                            resolveLoop();
+                        }
+                        else {
+                            // Use `PerformPromiseThen` instead of `uponPromise` to avoid
+                            // adding unnecessary `.catch(rethrowAssertionErrorRejection)` handlers
+                            PerformPromiseThen(pipeStep(), next, rejectLoop);
+                        }
+                    }
+                    next(false);
+                });
+            }
+            function pipeStep() {
+                if (shuttingDown) {
+                    return promiseResolvedWith(true);
+                }
+                return PerformPromiseThen(writer._readyPromise, () => {
+                    return newPromise((resolveRead, rejectRead) => {
+                        ReadableStreamDefaultReaderRead(reader, {
+                            _chunkSteps: chunk => {
+                                currentWrite = PerformPromiseThen(WritableStreamDefaultWriterWrite(writer, chunk), undefined, noop);
+                                resolveRead(false);
+                            },
+                            _closeSteps: () => resolveRead(true),
+                            _errorSteps: rejectRead
+                        });
+                    });
+                });
+            }
+            // Errors must be propagated forward
+            isOrBecomesErrored(source, reader._closedPromise, storedError => {
+                if (!preventAbort) {
+                    shutdownWithAction(() => WritableStreamAbort(dest, storedError), true, storedError);
+                }
+                else {
+                    shutdown(true, storedError);
+                }
+            });
+            // Errors must be propagated backward
+            isOrBecomesErrored(dest, writer._closedPromise, storedError => {
+                if (!preventCancel) {
+                    shutdownWithAction(() => ReadableStreamCancel(source, storedError), true, storedError);
+                }
+                else {
+                    shutdown(true, storedError);
+                }
+            });
+            // Closing must be propagated forward
+            isOrBecomesClosed(source, reader._closedPromise, () => {
+                if (!preventClose) {
+                    shutdownWithAction(() => WritableStreamDefaultWriterCloseWithErrorPropagation(writer));
+                }
+                else {
+                    shutdown();
+                }
+            });
+            // Closing must be propagated backward
+            if (WritableStreamCloseQueuedOrInFlight(dest) || dest._state === 'closed') {
+                const destClosed = new TypeError('the destination writable stream closed before all data could be piped to it');
+                if (!preventCancel) {
+                    shutdownWithAction(() => ReadableStreamCancel(source, destClosed), true, destClosed);
+                }
+                else {
+                    shutdown(true, destClosed);
+                }
+            }
+            setPromiseIsHandledToTrue(pipeLoop());
+            function waitForWritesToFinish() {
+                // Another write may have started while we were waiting on this currentWrite, so we have to be sure to wait
+                // for that too.
+                const oldCurrentWrite = currentWrite;
+                return PerformPromiseThen(currentWrite, () => oldCurrentWrite !== currentWrite ? waitForWritesToFinish() : undefined);
+            }
+            function isOrBecomesErrored(stream, promise, action) {
+                if (stream._state === 'errored') {
+                    action(stream._storedError);
+                }
+                else {
+                    uponRejection(promise, action);
+                }
+            }
+            function isOrBecomesClosed(stream, promise, action) {
+                if (stream._state === 'closed') {
+                    action();
+                }
+                else {
+                    uponFulfillment(promise, action);
+                }
+            }
+            function shutdownWithAction(action, originalIsError, originalError) {
+                if (shuttingDown) {
+                    return;
+                }
+                shuttingDown = true;
+                if (dest._state === 'writable' && !WritableStreamCloseQueuedOrInFlight(dest)) {
+                    uponFulfillment(waitForWritesToFinish(), doTheRest);
+                }
+                else {
+                    doTheRest();
+                }
+                function doTheRest() {
+                    uponPromise(action(), () => finalize(originalIsError, originalError), newError => finalize(true, newError));
+                }
+            }
+            function shutdown(isError, error) {
+                if (shuttingDown) {
+                    return;
+                }
+                shuttingDown = true;
+                if (dest._state === 'writable' && !WritableStreamCloseQueuedOrInFlight(dest)) {
+                    uponFulfillment(waitForWritesToFinish(), () => finalize(isError, error));
+                }
+                else {
+                    finalize(isError, error);
+                }
+            }
+            function finalize(isError, error) {
+                WritableStreamDefaultWriterRelease(writer);
+                ReadableStreamReaderGenericRelease(reader);
+                if (signal !== undefined) {
+                    signal.removeEventListener('abort', abortAlgorithm);
+                }
+                if (isError) {
+                    reject(error);
+                }
+                else {
+                    resolve(undefined);
+                }
+            }
+        });
+    }
+
+    /**
+     * Allows control of a {@link ReadableStream | readable stream}'s state and internal queue.
+     *
+     * @public
+     */
+    class ReadableStreamDefaultController {
+        constructor() {
+            throw new TypeError('Illegal constructor');
+        }
+        /**
+         * Returns the desired size to fill the controlled stream's internal queue. It can be negative, if the queue is
+         * over-full. An underlying source ought to use this information to determine when and how to apply backpressure.
+         */
+        get desiredSize() {
+            if (!IsReadableStreamDefaultController(this)) {
+                throw defaultControllerBrandCheckException$1('desiredSize');
+            }
+            return ReadableStreamDefaultControllerGetDesiredSize(this);
+        }
+        /**
+         * Closes the controlled readable stream. Consumers will still be able to read any previously-enqueued chunks from
+         * the stream, but once those are read, the stream will become closed.
+         */
+        close() {
+            if (!IsReadableStreamDefaultController(this)) {
+                throw defaultControllerBrandCheckException$1('close');
+            }
+            if (!ReadableStreamDefaultControllerCanCloseOrEnqueue(this)) {
+                throw new TypeError('The stream is not in a state that permits close');
+            }
+            ReadableStreamDefaultControllerClose(this);
+        }
+        enqueue(chunk = undefined) {
+            if (!IsReadableStreamDefaultController(this)) {
+                throw defaultControllerBrandCheckException$1('enqueue');
+            }
+            if (!ReadableStreamDefaultControllerCanCloseOrEnqueue(this)) {
+                throw new TypeError('The stream is not in a state that permits enqueue');
+            }
+            return ReadableStreamDefaultControllerEnqueue(this, chunk);
+        }
+        /**
+         * Errors the controlled readable stream, making all future interactions with it fail with the given error `e`.
+         */
+        error(e = undefined) {
+            if (!IsReadableStreamDefaultController(this)) {
+                throw defaultControllerBrandCheckException$1('error');
+            }
+            ReadableStreamDefaultControllerError(this, e);
+        }
+        /** @internal */
+        [CancelSteps](reason) {
+            ResetQueue(this);
+            const result = this._cancelAlgorithm(reason);
+            ReadableStreamDefaultControllerClearAlgorithms(this);
+            return result;
+        }
+        /** @internal */
+        [PullSteps](readRequest) {
+            const stream = this._controlledReadableStream;
+            if (this._queue.length > 0) {
+                const chunk = DequeueValue(this);
+                if (this._closeRequested && this._queue.length === 0) {
+                    ReadableStreamDefaultControllerClearAlgorithms(this);
+                    ReadableStreamClose(stream);
+                }
+                else {
+                    ReadableStreamDefaultControllerCallPullIfNeeded(this);
+                }
+                readRequest._chunkSteps(chunk);
+            }
+            else {
+                ReadableStreamAddReadRequest(stream, readRequest);
+                ReadableStreamDefaultControllerCallPullIfNeeded(this);
+            }
+        }
+    }
+    Object.defineProperties(ReadableStreamDefaultController.prototype, {
+        close: { enumerable: true },
+        enqueue: { enumerable: true },
+        error: { enumerable: true },
+        desiredSize: { enumerable: true }
+    });
+    if (typeof SymbolPolyfill.toStringTag === 'symbol') {
+        Object.defineProperty(ReadableStreamDefaultController.prototype, SymbolPolyfill.toStringTag, {
+            value: 'ReadableStreamDefaultController',
+            configurable: true
+        });
+    }
+    // Abstract operations for the ReadableStreamDefaultController.
+    function IsReadableStreamDefaultController(x) {
+        if (!typeIsObject(x)) {
+            return false;
+        }
+        if (!Object.prototype.hasOwnProperty.call(x, '_controlledReadableStream')) {
+            return false;
+        }
+        return x instanceof ReadableStreamDefaultController;
+    }
+    function ReadableStreamDefaultControllerCallPullIfNeeded(controller) {
+        const shouldPull = ReadableStreamDefaultControllerShouldCallPull(controller);
+        if (!shouldPull) {
+            return;
+        }
+        if (controller._pulling) {
+            controller._pullAgain = true;
+            return;
+        }
+        controller._pulling = true;
+        const pullPromise = controller._pullAlgorithm();
+        uponPromise(pullPromise, () => {
+            controller._pulling = false;
+            if (controller._pullAgain) {
+                controller._pullAgain = false;
+                ReadableStreamDefaultControllerCallPullIfNeeded(controller);
+            }
+        }, e => {
+            ReadableStreamDefaultControllerError(controller, e);
+        });
+    }
+    function ReadableStreamDefaultControllerShouldCallPull(controller) {
+        const stream = controller._controlledReadableStream;
+        if (!ReadableStreamDefaultControllerCanCloseOrEnqueue(controller)) {
+            return false;
+        }
+        if (!controller._started) {
+            return false;
+        }
+        if (IsReadableStreamLocked(stream) && ReadableStreamGetNumReadRequests(stream) > 0) {
+            return true;
+        }
+        const desiredSize = ReadableStreamDefaultControllerGetDesiredSize(controller);
+        if (desiredSize > 0) {
+            return true;
+        }
+        return false;
+    }
+    function ReadableStreamDefaultControllerClearAlgorithms(controller) {
+        controller._pullAlgorithm = undefined;
+        controller._cancelAlgorithm = undefined;
+        controller._strategySizeAlgorithm = undefined;
+    }
+    // A client of ReadableStreamDefaultController may use these functions directly to bypass state check.
+    function ReadableStreamDefaultControllerClose(controller) {
+        if (!ReadableStreamDefaultControllerCanCloseOrEnqueue(controller)) {
+            return;
+        }
+        const stream = controller._controlledReadableStream;
+        controller._closeRequested = true;
+        if (controller._queue.length === 0) {
+            ReadableStreamDefaultControllerClearAlgorithms(controller);
+            ReadableStreamClose(stream);
+        }
+    }
+    function ReadableStreamDefaultControllerEnqueue(controller, chunk) {
+        if (!ReadableStreamDefaultControllerCanCloseOrEnqueue(controller)) {
+            return;
+        }
+        const stream = controller._controlledReadableStream;
+        if (IsReadableStreamLocked(stream) && ReadableStreamGetNumReadRequests(stream) > 0) {
+            ReadableStreamFulfillReadRequest(stream, chunk, false);
+        }
+        else {
+            let chunkSize;
+            try {
+                chunkSize = controller._strategySizeAlgorithm(chunk);
+            }
+            catch (chunkSizeE) {
+                ReadableStreamDefaultControllerError(controller, chunkSizeE);
+                throw chunkSizeE;
+            }
+            try {
+                EnqueueValueWithSize(controller, chunk, chunkSize);
+            }
+            catch (enqueueE) {
+                ReadableStreamDefaultControllerError(controller, enqueueE);
+                throw enqueueE;
+            }
+        }
+        ReadableStreamDefaultControllerCallPullIfNeeded(controller);
+    }
+    function ReadableStreamDefaultControllerError(controller, e) {
+        const stream = controller._controlledReadableStream;
+        if (stream._state !== 'readable') {
+            return;
+        }
+        ResetQueue(controller);
+        ReadableStreamDefaultControllerClearAlgorithms(controller);
+        ReadableStreamError(stream, e);
+    }
+    function ReadableStreamDefaultControllerGetDesiredSize(controller) {
+        const state = controller._controlledReadableStream._state;
+        if (state === 'errored') {
+            return null;
+        }
+        if (state === 'closed') {
+            return 0;
+        }
+        return controller._strategyHWM - controller._queueTotalSize;
+    }
+    // This is used in the implementation of TransformStream.
+    function ReadableStreamDefaultControllerHasBackpressure(controller) {
+        if (ReadableStreamDefaultControllerShouldCallPull(controller)) {
+            return false;
+        }
+        return true;
+    }
+    function ReadableStreamDefaultControllerCanCloseOrEnqueue(controller) {
+        const state = controller._controlledReadableStream._state;
+        if (!controller._closeRequested && state === 'readable') {
+            return true;
+        }
+        return false;
+    }
+    function SetUpReadableStreamDefaultController(stream, controller, startAlgorithm, pullAlgorithm, cancelAlgorithm, highWaterMark, sizeAlgorithm) {
+        controller._controlledReadableStream = stream;
+        controller._queue = undefined;
+        controller._queueTotalSize = undefined;
+        ResetQueue(controller);
+        controller._started = false;
+        controller._closeRequested = false;
+        controller._pullAgain = false;
+        controller._pulling = false;
+        controller._strategySizeAlgorithm = sizeAlgorithm;
+        controller._strategyHWM = highWaterMark;
+        controller._pullAlgorithm = pullAlgorithm;
+        controller._cancelAlgorithm = cancelAlgorithm;
+        stream._readableStreamController = controller;
+        const startResult = startAlgorithm();
+        uponPromise(promiseResolvedWith(startResult), () => {
+            controller._started = true;
+            ReadableStreamDefaultControllerCallPullIfNeeded(controller);
+        }, r => {
+            ReadableStreamDefaultControllerError(controller, r);
+        });
+    }
+    function SetUpReadableStreamDefaultControllerFromUnderlyingSource(stream, underlyingSource, highWaterMark, sizeAlgorithm) {
+        const controller = Object.create(ReadableStreamDefaultController.prototype);
+        let startAlgorithm = () => undefined;
+        let pullAlgorithm = () => promiseResolvedWith(undefined);
+        let cancelAlgorithm = () => promiseResolvedWith(undefined);
+        if (underlyingSource.start !== undefined) {
+            startAlgorithm = () => underlyingSource.start(controller);
+        }
+        if (underlyingSource.pull !== undefined) {
+            pullAlgorithm = () => underlyingSource.pull(controller);
+        }
+        if (underlyingSource.cancel !== undefined) {
+            cancelAlgorithm = reason => underlyingSource.cancel(reason);
+        }
+        SetUpReadableStreamDefaultController(stream, controller, startAlgorithm, pullAlgorithm, cancelAlgorithm, highWaterMark, sizeAlgorithm);
+    }
+    // Helper functions for the ReadableStreamDefaultController.
+    function defaultControllerBrandCheckException$1(name) {
+        return new TypeError(`ReadableStreamDefaultController.prototype.${name} can only be used on a ReadableStreamDefaultController`);
+    }
+
+    function ReadableStreamTee(stream, cloneForBranch2) {
+        if (IsReadableByteStreamController(stream._readableStreamController)) {
+            return ReadableByteStreamTee(stream);
+        }
+        return ReadableStreamDefaultTee(stream);
+    }
+    function ReadableStreamDefaultTee(stream, cloneForBranch2) {
+        const reader = AcquireReadableStreamDefaultReader(stream);
+        let reading = false;
+        let readAgain = false;
+        let canceled1 = false;
+        let canceled2 = false;
+        let reason1;
+        let reason2;
+        let branch1;
+        let branch2;
+        let resolveCancelPromise;
+        const cancelPromise = newPromise(resolve => {
+            resolveCancelPromise = resolve;
+        });
+        function pullAlgorithm() {
+            if (reading) {
+                readAgain = true;
+                return promiseResolvedWith(undefined);
+            }
+            reading = true;
+            const readRequest = {
+                _chunkSteps: chunk => {
+                    // This needs to be delayed a microtask because it takes at least a microtask to detect errors (using
+                    // reader._closedPromise below), and we want errors in stream to error both branches immediately. We cannot let
+                    // successful synchronously-available reads get ahead of asynchronously-available errors.
+                    queueMicrotask(() => {
+                        readAgain = false;
+                        const chunk1 = chunk;
+                        const chunk2 = chunk;
+                        // There is no way to access the cloning code right now in the reference implementation.
+                        // If we add one then we'll need an implementation for serializable objects.
+                        // if (!canceled2 && cloneForBranch2) {
+                        //   chunk2 = StructuredDeserialize(StructuredSerialize(chunk2));
+                        // }
+                        if (!canceled1) {
+                            ReadableStreamDefaultControllerEnqueue(branch1._readableStreamController, chunk1);
+                        }
+                        if (!canceled2) {
+                            ReadableStreamDefaultControllerEnqueue(branch2._readableStreamController, chunk2);
+                        }
+                        reading = false;
+                        if (readAgain) {
+                            pullAlgorithm();
+                        }
+                    });
+                },
+                _closeSteps: () => {
+                    reading = false;
+                    if (!canceled1) {
+                        ReadableStreamDefaultControllerClose(branch1._readableStreamController);
+                    }
+                    if (!canceled2) {
+                        ReadableStreamDefaultControllerClose(branch2._readableStreamController);
+                    }
+                    if (!canceled1 || !canceled2) {
+                        resolveCancelPromise(undefined);
+                    }
+                },
+                _errorSteps: () => {
+                    reading = false;
+                }
+            };
+            ReadableStreamDefaultReaderRead(reader, readRequest);
+            return promiseResolvedWith(undefined);
+        }
+        function cancel1Algorithm(reason) {
+            canceled1 = true;
+            reason1 = reason;
+            if (canceled2) {
+                const compositeReason = CreateArrayFromList([reason1, reason2]);
+                const cancelResult = ReadableStreamCancel(stream, compositeReason);
+                resolveCancelPromise(cancelResult);
+            }
+            return cancelPromise;
+        }
+        function cancel2Algorithm(reason) {
+            canceled2 = true;
+            reason2 = reason;
+            if (canceled1) {
+                const compositeReason = CreateArrayFromList([reason1, reason2]);
+                const cancelResult = ReadableStreamCancel(stream, compositeReason);
+                resolveCancelPromise(cancelResult);
+            }
+            return cancelPromise;
+        }
+        function startAlgorithm() {
+            // do nothing
+        }
+        branch1 = CreateReadableStream(startAlgorithm, pullAlgorithm, cancel1Algorithm);
+        branch2 = CreateReadableStream(startAlgorithm, pullAlgorithm, cancel2Algorithm);
+        uponRejection(reader._closedPromise, (r) => {
+            ReadableStreamDefaultControllerError(branch1._readableStreamController, r);
+            ReadableStreamDefaultControllerError(branch2._readableStreamController, r);
+            if (!canceled1 || !canceled2) {
+                resolveCancelPromise(undefined);
+            }
+        });
+        return [branch1, branch2];
+    }
+    function ReadableByteStreamTee(stream) {
+        let reader = AcquireReadableStreamDefaultReader(stream);
+        let reading = false;
+        let readAgainForBranch1 = false;
+        let readAgainForBranch2 = false;
+        let canceled1 = false;
+        let canceled2 = false;
+        let reason1;
+        let reason2;
+        let branch1;
+        let branch2;
+        let resolveCancelPromise;
+        const cancelPromise = newPromise(resolve => {
+            resolveCancelPromise = resolve;
+        });
+        function forwardReaderError(thisReader) {
+            uponRejection(thisReader._closedPromise, r => {
+                if (thisReader !== reader) {
+                    return;
+                }
+                ReadableByteStreamControllerError(branch1._readableStreamController, r);
+                ReadableByteStreamControllerError(branch2._readableStreamController, r);
+                if (!canceled1 || !canceled2) {
+                    resolveCancelPromise(undefined);
+                }
+            });
+        }
+        function pullWithDefaultReader() {
+            if (IsReadableStreamBYOBReader(reader)) {
+                ReadableStreamReaderGenericRelease(reader);
+                reader = AcquireReadableStreamDefaultReader(stream);
+                forwardReaderError(reader);
+            }
+            const readRequest = {
+                _chunkSteps: chunk => {
+                    // This needs to be delayed a microtask because it takes at least a microtask to detect errors (using
+                    // reader._closedPromise below), and we want errors in stream to error both branches immediately. We cannot let
+                    // successful synchronously-available reads get ahead of asynchronously-available errors.
+                    queueMicrotask(() => {
+                        readAgainForBranch1 = false;
+                        readAgainForBranch2 = false;
+                        const chunk1 = chunk;
+                        let chunk2 = chunk;
+                        if (!canceled1 && !canceled2) {
+                            try {
+                                chunk2 = CloneAsUint8Array(chunk);
+                            }
+                            catch (cloneE) {
+                                ReadableByteStreamControllerError(branch1._readableStreamController, cloneE);
+                                ReadableByteStreamControllerError(branch2._readableStreamController, cloneE);
+                                resolveCancelPromise(ReadableStreamCancel(stream, cloneE));
+                                return;
+                            }
+                        }
+                        if (!canceled1) {
+                            ReadableByteStreamControllerEnqueue(branch1._readableStreamController, chunk1);
+                        }
+                        if (!canceled2) {
+                            ReadableByteStreamControllerEnqueue(branch2._readableStreamController, chunk2);
+                        }
+                        reading = false;
+                        if (readAgainForBranch1) {
+                            pull1Algorithm();
+                        }
+                        else if (readAgainForBranch2) {
+                            pull2Algorithm();
+                        }
+                    });
+                },
+                _closeSteps: () => {
+                    reading = false;
+                    if (!canceled1) {
+                        ReadableByteStreamControllerClose(branch1._readableStreamController);
+                    }
+                    if (!canceled2) {
+                        ReadableByteStreamControllerClose(branch2._readableStreamController);
+                    }
+                    if (branch1._readableStreamController._pendingPullIntos.length > 0) {
+                        ReadableByteStreamControllerRespond(branch1._readableStreamController, 0);
+                    }
+                    if (branch2._readableStreamController._pendingPullIntos.length > 0) {
+                        ReadableByteStreamControllerRespond(branch2._readableStreamController, 0);
+                    }
+                    if (!canceled1 || !canceled2) {
+                        resolveCancelPromise(undefined);
+                    }
+                },
+                _errorSteps: () => {
+                    reading = false;
+                }
+            };
+            ReadableStreamDefaultReaderRead(reader, readRequest);
+        }
+        function pullWithBYOBReader(view, forBranch2) {
+            if (IsReadableStreamDefaultReader(reader)) {
+                ReadableStreamReaderGenericRelease(reader);
+                reader = AcquireReadableStreamBYOBReader(stream);
+                forwardReaderError(reader);
+            }
+            const byobBranch = forBranch2 ? branch2 : branch1;
+            const otherBranch = forBranch2 ? branch1 : branch2;
+            const readIntoRequest = {
+                _chunkSteps: chunk => {
+                    // This needs to be delayed a microtask because it takes at least a microtask to detect errors (using
+                    // reader._closedPromise below), and we want errors in stream to error both branches immediately. We cannot let
+                    // successful synchronously-available reads get ahead of asynchronously-available errors.
+                    queueMicrotask(() => {
+                        readAgainForBranch1 = false;
+                        readAgainForBranch2 = false;
+                        const byobCanceled = forBranch2 ? canceled2 : canceled1;
+                        const otherCanceled = forBranch2 ? canceled1 : canceled2;
+                        if (!otherCanceled) {
+                            let clonedChunk;
+                            try {
+                                clonedChunk = CloneAsUint8Array(chunk);
+                            }
+                            catch (cloneE) {
+                                ReadableByteStreamControllerError(byobBranch._readableStreamController, cloneE);
+                                ReadableByteStreamControllerError(otherBranch._readableStreamController, cloneE);
+                                resolveCancelPromise(ReadableStreamCancel(stream, cloneE));
+                                return;
+                            }
+                            if (!byobCanceled) {
+                                ReadableByteStreamControllerRespondWithNewView(byobBranch._readableStreamController, chunk);
+                            }
+                            ReadableByteStreamControllerEnqueue(otherBranch._readableStreamController, clonedChunk);
+                        }
+                        else if (!byobCanceled) {
+                            ReadableByteStreamControllerRespondWithNewView(byobBranch._readableStreamController, chunk);
+                        }
+                        reading = false;
+                        if (readAgainForBranch1) {
+                            pull1Algorithm();
+                        }
+                        else if (readAgainForBranch2) {
+                            pull2Algorithm();
+                        }
+                    });
+                },
+                _closeSteps: chunk => {
+                    reading = false;
+                    const byobCanceled = forBranch2 ? canceled2 : canceled1;
+                    const otherCanceled = forBranch2 ? canceled1 : canceled2;
+                    if (!byobCanceled) {
+                        ReadableByteStreamControllerClose(byobBranch._readableStreamController);
+                    }
+                    if (!otherCanceled) {
+                        ReadableByteStreamControllerClose(otherBranch._readableStreamController);
+                    }
+                    if (chunk !== undefined) {
+                        if (!byobCanceled) {
+                            ReadableByteStreamControllerRespondWithNewView(byobBranch._readableStreamController, chunk);
+                        }
+                        if (!otherCanceled && otherBranch._readableStreamController._pendingPullIntos.length > 0) {
+                            ReadableByteStreamControllerRespond(otherBranch._readableStreamController, 0);
+                        }
+                    }
+                    if (!byobCanceled || !otherCanceled) {
+                        resolveCancelPromise(undefined);
+                    }
+                },
+                _errorSteps: () => {
+                    reading = false;
+                }
+            };
+            ReadableStreamBYOBReaderRead(reader, view, readIntoRequest);
+        }
+        function pull1Algorithm() {
+            if (reading) {
+                readAgainForBranch1 = true;
+                return promiseResolvedWith(undefined);
+            }
+            reading = true;
+            const byobRequest = ReadableByteStreamControllerGetBYOBRequest(branch1._readableStreamController);
+            if (byobRequest === null) {
+                pullWithDefaultReader();
+            }
+            else {
+                pullWithBYOBReader(byobRequest._view, false);
+            }
+            return promiseResolvedWith(undefined);
+        }
+        function pull2Algorithm() {
+            if (reading) {
+                readAgainForBranch2 = true;
+                return promiseResolvedWith(undefined);
+            }
+            reading = true;
+            const byobRequest = ReadableByteStreamControllerGetBYOBRequest(branch2._readableStreamController);
+            if (byobRequest === null) {
+                pullWithDefaultReader();
+            }
+            else {
+                pullWithBYOBReader(byobRequest._view, true);
+            }
+            return promiseResolvedWith(undefined);
+        }
+        function cancel1Algorithm(reason) {
+            canceled1 = true;
+            reason1 = reason;
+            if (canceled2) {
+                const compositeReason = CreateArrayFromList([reason1, reason2]);
+                const cancelResult = ReadableStreamCancel(stream, compositeReason);
+                resolveCancelPromise(cancelResult);
+            }
+            return cancelPromise;
+        }
+        function cancel2Algorithm(reason) {
+            canceled2 = true;
+            reason2 = reason;
+            if (canceled1) {
+                const compositeReason = CreateArrayFromList([reason1, reason2]);
+                const cancelResult = ReadableStreamCancel(stream, compositeReason);
+                resolveCancelPromise(cancelResult);
+            }
+            return cancelPromise;
+        }
+        function startAlgorithm() {
+            return;
+        }
+        branch1 = CreateReadableByteStream(startAlgorithm, pull1Algorithm, cancel1Algorithm);
+        branch2 = CreateReadableByteStream(startAlgorithm, pull2Algorithm, cancel2Algorithm);
+        forwardReaderError(reader);
+        return [branch1, branch2];
+    }
+
+    function convertUnderlyingDefaultOrByteSource(source, context) {
+        assertDictionary(source, context);
+        const original = source;
+        const autoAllocateChunkSize = original === null || original === void 0 ? void 0 : original.autoAllocateChunkSize;
+        const cancel = original === null || original === void 0 ? void 0 : original.cancel;
+        const pull = original === null || original === void 0 ? void 0 : original.pull;
+        const start = original === null || original === void 0 ? void 0 : original.start;
+        const type = original === null || original === void 0 ? void 0 : original.type;
+        return {
+            autoAllocateChunkSize: autoAllocateChunkSize === undefined ?
+                undefined :
+                convertUnsignedLongLongWithEnforceRange(autoAllocateChunkSize, `${context} has member 'autoAllocateChunkSize' that`),
+            cancel: cancel === undefined ?
+                undefined :
+                convertUnderlyingSourceCancelCallback(cancel, original, `${context} has member 'cancel' that`),
+            pull: pull === undefined ?
+                undefined :
+                convertUnderlyingSourcePullCallback(pull, original, `${context} has member 'pull' that`),
+            start: start === undefined ?
+                undefined :
+                convertUnderlyingSourceStartCallback(start, original, `${context} has member 'start' that`),
+            type: type === undefined ? undefined : convertReadableStreamType(type, `${context} has member 'type' that`)
+        };
+    }
+    function convertUnderlyingSourceCancelCallback(fn, original, context) {
+        assertFunction(fn, context);
+        return (reason) => promiseCall(fn, original, [reason]);
+    }
+    function convertUnderlyingSourcePullCallback(fn, original, context) {
+        assertFunction(fn, context);
+        return (controller) => promiseCall(fn, original, [controller]);
+    }
+    function convertUnderlyingSourceStartCallback(fn, original, context) {
+        assertFunction(fn, context);
+        return (controller) => reflectCall(fn, original, [controller]);
+    }
+    function convertReadableStreamType(type, context) {
+        type = `${type}`;
+        if (type !== 'bytes') {
+            throw new TypeError(`${context} '${type}' is not a valid enumeration value for ReadableStreamType`);
+        }
+        return type;
+    }
+
+    function convertReaderOptions(options, context) {
+        assertDictionary(options, context);
+        const mode = options === null || options === void 0 ? void 0 : options.mode;
+        return {
+            mode: mode === undefined ? undefined : convertReadableStreamReaderMode(mode, `${context} has member 'mode' that`)
+        };
+    }
+    function convertReadableStreamReaderMode(mode, context) {
+        mode = `${mode}`;
+        if (mode !== 'byob') {
+            throw new TypeError(`${context} '${mode}' is not a valid enumeration value for ReadableStreamReaderMode`);
+        }
+        return mode;
+    }
+
+    function convertIteratorOptions(options, context) {
+        assertDictionary(options, context);
+        const preventCancel = options === null || options === void 0 ? void 0 : options.preventCancel;
+        return { preventCancel: Boolean(preventCancel) };
+    }
+
+    function convertPipeOptions(options, context) {
+        assertDictionary(options, context);
+        const preventAbort = options === null || options === void 0 ? void 0 : options.preventAbort;
+        const preventCancel = options === null || options === void 0 ? void 0 : options.preventCancel;
+        const preventClose = options === null || options === void 0 ? void 0 : options.preventClose;
+        const signal = options === null || options === void 0 ? void 0 : options.signal;
+        if (signal !== undefined) {
+            assertAbortSignal(signal, `${context} has member 'signal' that`);
+        }
+        return {
+            preventAbort: Boolean(preventAbort),
+            preventCancel: Boolean(preventCancel),
+            preventClose: Boolean(preventClose),
+            signal
+        };
+    }
+    function assertAbortSignal(signal, context) {
+        if (!isAbortSignal(signal)) {
+            throw new TypeError(`${context} is not an AbortSignal.`);
+        }
+    }
+
+    function convertReadableWritablePair(pair, context) {
+        assertDictionary(pair, context);
+        const readable = pair === null || pair === void 0 ? void 0 : pair.readable;
+        assertRequiredField(readable, 'readable', 'ReadableWritablePair');
+        assertReadableStream(readable, `${context} has member 'readable' that`);
+        const writable = pair === null || pair === void 0 ? void 0 : pair.writable;
+        assertRequiredField(writable, 'writable', 'ReadableWritablePair');
+        assertWritableStream(writable, `${context} has member 'writable' that`);
+        return { readable, writable };
+    }
+
+    /**
+     * A readable stream represents a source of data, from which you can read.
+     *
+     * @public
+     */
+    class ReadableStream {
+        constructor(rawUnderlyingSource = {}, rawStrategy = {}) {
+            if (rawUnderlyingSource === undefined) {
+                rawUnderlyingSource = null;
+            }
+            else {
+                assertObject(rawUnderlyingSource, 'First parameter');
+            }
+            const strategy = convertQueuingStrategy(rawStrategy, 'Second parameter');
+            const underlyingSource = convertUnderlyingDefaultOrByteSource(rawUnderlyingSource, 'First parameter');
+            InitializeReadableStream(this);
+            if (underlyingSource.type === 'bytes') {
+                if (strategy.size !== undefined) {
+                    throw new RangeError('The strategy for a byte stream cannot have a size function');
+                }
+                const highWaterMark = ExtractHighWaterMark(strategy, 0);
+                SetUpReadableByteStreamControllerFromUnderlyingSource(this, underlyingSource, highWaterMark);
+            }
+            else {
+                const sizeAlgorithm = ExtractSizeAlgorithm(strategy);
+                const highWaterMark = ExtractHighWaterMark(strategy, 1);
+                SetUpReadableStreamDefaultControllerFromUnderlyingSource(this, underlyingSource, highWaterMark, sizeAlgorithm);
+            }
+        }
+        /**
+         * Whether or not the readable stream is locked to a {@link ReadableStreamDefaultReader | reader}.
+         */
+        get locked() {
+            if (!IsReadableStream(this)) {
+                throw streamBrandCheckException$1('locked');
+            }
+            return IsReadableStreamLocked(this);
+        }
+        /**
+         * Cancels the stream, signaling a loss of interest in the stream by a consumer.
+         *
+         * The supplied `reason` argument will be given to the underlying source's {@link UnderlyingSource.cancel | cancel()}
+         * method, which might or might not use it.
+         */
+        cancel(reason = undefined) {
+            if (!IsReadableStream(this)) {
+                return promiseRejectedWith(streamBrandCheckException$1('cancel'));
+            }
+            if (IsReadableStreamLocked(this)) {
+                return promiseRejectedWith(new TypeError('Cannot cancel a stream that already has a reader'));
+            }
+            return ReadableStreamCancel(this, reason);
+        }
+        getReader(rawOptions = undefined) {
+            if (!IsReadableStream(this)) {
+                throw streamBrandCheckException$1('getReader');
+            }
+            const options = convertReaderOptions(rawOptions, 'First parameter');
+            if (options.mode === undefined) {
+                return AcquireReadableStreamDefaultReader(this);
+            }
+            return AcquireReadableStreamBYOBReader(this);
+        }
+        pipeThrough(rawTransform, rawOptions = {}) {
+            if (!IsReadableStream(this)) {
+                throw streamBrandCheckException$1('pipeThrough');
+            }
+            assertRequiredArgument(rawTransform, 1, 'pipeThrough');
+            const transform = convertReadableWritablePair(rawTransform, 'First parameter');
+            const options = convertPipeOptions(rawOptions, 'Second parameter');
+            if (IsReadableStreamLocked(this)) {
+                throw new TypeError('ReadableStream.prototype.pipeThrough cannot be used on a locked ReadableStream');
+            }
+            if (IsWritableStreamLocked(transform.writable)) {
+                throw new TypeError('ReadableStream.prototype.pipeThrough cannot be used on a locked WritableStream');
+            }
+            const promise = ReadableStreamPipeTo(this, transform.writable, options.preventClose, options.preventAbort, options.preventCancel, options.signal);
+            setPromiseIsHandledToTrue(promise);
+            return transform.readable;
+        }
+        pipeTo(destination, rawOptions = {}) {
+            if (!IsReadableStream(this)) {
+                return promiseRejectedWith(streamBrandCheckException$1('pipeTo'));
+            }
+            if (destination === undefined) {
+                return promiseRejectedWith(`Parameter 1 is required in 'pipeTo'.`);
+            }
+            if (!IsWritableStream(destination)) {
+                return promiseRejectedWith(new TypeError(`ReadableStream.prototype.pipeTo's first argument must be a WritableStream`));
+            }
+            let options;
+            try {
+                options = convertPipeOptions(rawOptions, 'Second parameter');
+            }
+            catch (e) {
+                return promiseRejectedWith(e);
+            }
+            if (IsReadableStreamLocked(this)) {
+                return promiseRejectedWith(new TypeError('ReadableStream.prototype.pipeTo cannot be used on a locked ReadableStream'));
+            }
+            if (IsWritableStreamLocked(destination)) {
+                return promiseRejectedWith(new TypeError('ReadableStream.prototype.pipeTo cannot be used on a locked WritableStream'));
+            }
+            return ReadableStreamPipeTo(this, destination, options.preventClose, options.preventAbort, options.preventCancel, options.signal);
+        }
+        /**
+         * Tees this readable stream, returning a two-element array containing the two resulting branches as
+         * new {@link ReadableStream} instances.
+         *
+         * Teeing a stream will lock it, preventing any other consumer from acquiring a reader.
+         * To cancel the stream, cancel both of the resulting branches; a composite cancellation reason will then be
+         * propagated to the stream's underlying source.
+         *
+         * Note that the chunks seen in each branch will be the same object. If the chunks are not immutable,
+         * this could allow interference between the two branches.
+         */
+        tee() {
+            if (!IsReadableStream(this)) {
+                throw streamBrandCheckException$1('tee');
+            }
+            const branches = ReadableStreamTee(this);
+            return CreateArrayFromList(branches);
+        }
+        values(rawOptions = undefined) {
+            if (!IsReadableStream(this)) {
+                throw streamBrandCheckException$1('values');
+            }
+            const options = convertIteratorOptions(rawOptions, 'First parameter');
+            return AcquireReadableStreamAsyncIterator(this, options.preventCancel);
+        }
+    }
+    Object.defineProperties(ReadableStream.prototype, {
+        cancel: { enumerable: true },
+        getReader: { enumerable: true },
+        pipeThrough: { enumerable: true },
+        pipeTo: { enumerable: true },
+        tee: { enumerable: true },
+        values: { enumerable: true },
+        locked: { enumerable: true }
+    });
+    if (typeof SymbolPolyfill.toStringTag === 'symbol') {
+        Object.defineProperty(ReadableStream.prototype, SymbolPolyfill.toStringTag, {
+            value: 'ReadableStream',
+            configurable: true
+        });
+    }
+    if (typeof SymbolPolyfill.asyncIterator === 'symbol') {
+        Object.defineProperty(ReadableStream.prototype, SymbolPolyfill.asyncIterator, {
+            value: ReadableStream.prototype.values,
+            writable: true,
+            configurable: true
+        });
+    }
+    // Abstract operations for the ReadableStream.
+    // Throws if and only if startAlgorithm throws.
+    function CreateReadableStream(startAlgorithm, pullAlgorithm, cancelAlgorithm, highWaterMark = 1, sizeAlgorithm = () => 1) {
+        const stream = Object.create(ReadableStream.prototype);
+        InitializeReadableStream(stream);
+        const controller = Object.create(ReadableStreamDefaultController.prototype);
+        SetUpReadableStreamDefaultController(stream, controller, startAlgorithm, pullAlgorithm, cancelAlgorithm, highWaterMark, sizeAlgorithm);
+        return stream;
+    }
+    // Throws if and only if startAlgorithm throws.
+    function CreateReadableByteStream(startAlgorithm, pullAlgorithm, cancelAlgorithm) {
+        const stream = Object.create(ReadableStream.prototype);
+        InitializeReadableStream(stream);
+        const controller = Object.create(ReadableByteStreamController.prototype);
+        SetUpReadableByteStreamController(stream, controller, startAlgorithm, pullAlgorithm, cancelAlgorithm, 0, undefined);
+        return stream;
+    }
+    function InitializeReadableStream(stream) {
+        stream._state = 'readable';
+        stream._reader = undefined;
+        stream._storedError = undefined;
+        stream._disturbed = false;
+    }
+    function IsReadableStream(x) {
+        if (!typeIsObject(x)) {
+            return false;
+        }
+        if (!Object.prototype.hasOwnProperty.call(x, '_readableStreamController')) {
+            return false;
+        }
+        return x instanceof ReadableStream;
+    }
+    function IsReadableStreamLocked(stream) {
+        if (stream._reader === undefined) {
+            return false;
+        }
+        return true;
+    }
+    // ReadableStream API exposed for controllers.
+    function ReadableStreamCancel(stream, reason) {
+        stream._disturbed = true;
+        if (stream._state === 'closed') {
+            return promiseResolvedWith(undefined);
+        }
+        if (stream._state === 'errored') {
+            return promiseRejectedWith(stream._storedError);
+        }
+        ReadableStreamClose(stream);
+        const reader = stream._reader;
+        if (reader !== undefined && IsReadableStreamBYOBReader(reader)) {
+            reader._readIntoRequests.forEach(readIntoRequest => {
+                readIntoRequest._closeSteps(undefined);
+            });
+            reader._readIntoRequests = new SimpleQueue();
+        }
+        const sourceCancelPromise = stream._readableStreamController[CancelSteps](reason);
+        return transformPromiseWith(sourceCancelPromise, noop);
+    }
+    function ReadableStreamClose(stream) {
+        stream._state = 'closed';
+        const reader = stream._reader;
+        if (reader === undefined) {
+            return;
+        }
+        defaultReaderClosedPromiseResolve(reader);
+        if (IsReadableStreamDefaultReader(reader)) {
+            reader._readRequests.forEach(readRequest => {
+                readRequest._closeSteps();
+            });
+            reader._readRequests = new SimpleQueue();
+        }
+    }
+    function ReadableStreamError(stream, e) {
+        stream._state = 'errored';
+        stream._storedError = e;
+        const reader = stream._reader;
+        if (reader === undefined) {
+            return;
+        }
+        defaultReaderClosedPromiseReject(reader, e);
+        if (IsReadableStreamDefaultReader(reader)) {
+            reader._readRequests.forEach(readRequest => {
+                readRequest._errorSteps(e);
+            });
+            reader._readRequests = new SimpleQueue();
+        }
+        else {
+            reader._readIntoRequests.forEach(readIntoRequest => {
+                readIntoRequest._errorSteps(e);
+            });
+            reader._readIntoRequests = new SimpleQueue();
+        }
+    }
+    // Helper functions for the ReadableStream.
+    function streamBrandCheckException$1(name) {
+        return new TypeError(`ReadableStream.prototype.${name} can only be used on a ReadableStream`);
+    }
+
+    function convertQueuingStrategyInit(init, context) {
+        assertDictionary(init, context);
+        const highWaterMark = init === null || init === void 0 ? void 0 : init.highWaterMark;
+        assertRequiredField(highWaterMark, 'highWaterMark', 'QueuingStrategyInit');
+        return {
+            highWaterMark: convertUnrestrictedDouble(highWaterMark)
+        };
+    }
+
+    // The size function must not have a prototype property nor be a constructor
+    const byteLengthSizeFunction = (chunk) => {
+        return chunk.byteLength;
+    };
+    try {
+        Object.defineProperty(byteLengthSizeFunction, 'name', {
+            value: 'size',
+            configurable: true
+        });
+    }
+    catch (_a) {
+        // This property is non-configurable in older browsers, so ignore if this throws.
+        // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Function/name#browser_compatibility
+    }
+    /**
+     * A queuing strategy that counts the number of bytes in each chunk.
+     *
+     * @public
+     */
+    class ByteLengthQueuingStrategy {
+        constructor(options) {
+            assertRequiredArgument(options, 1, 'ByteLengthQueuingStrategy');
+            options = convertQueuingStrategyInit(options, 'First parameter');
+            this._byteLengthQueuingStrategyHighWaterMark = options.highWaterMark;
+        }
+        /**
+         * Returns the high water mark provided to the constructor.
+         */
+        get highWaterMark() {
+            if (!IsByteLengthQueuingStrategy(this)) {
+                throw byteLengthBrandCheckException('highWaterMark');
+            }
+            return this._byteLengthQueuingStrategyHighWaterMark;
+        }
+        /**
+         * Measures the size of `chunk` by returning the value of its `byteLength` property.
+         */
+        get size() {
+            if (!IsByteLengthQueuingStrategy(this)) {
+                throw byteLengthBrandCheckException('size');
+            }
+            return byteLengthSizeFunction;
+        }
+    }
+    Object.defineProperties(ByteLengthQueuingStrategy.prototype, {
+        highWaterMark: { enumerable: true },
+        size: { enumerable: true }
+    });
+    if (typeof SymbolPolyfill.toStringTag === 'symbol') {
+        Object.defineProperty(ByteLengthQueuingStrategy.prototype, SymbolPolyfill.toStringTag, {
+            value: 'ByteLengthQueuingStrategy',
+            configurable: true
+        });
+    }
+    // Helper functions for the ByteLengthQueuingStrategy.
+    function byteLengthBrandCheckException(name) {
+        return new TypeError(`ByteLengthQueuingStrategy.prototype.${name} can only be used on a ByteLengthQueuingStrategy`);
+    }
+    function IsByteLengthQueuingStrategy(x) {
+        if (!typeIsObject(x)) {
+            return false;
+        }
+        if (!Object.prototype.hasOwnProperty.call(x, '_byteLengthQueuingStrategyHighWaterMark')) {
+            return false;
+        }
+        return x instanceof ByteLengthQueuingStrategy;
+    }
+
+    // The size function must not have a prototype property nor be a constructor
+    const countSizeFunction = () => {
+        return 1;
+    };
+    try {
+        Object.defineProperty(countSizeFunction, 'name', {
+            value: 'size',
+            configurable: true
+        });
+    }
+    catch (_a) {
+        // This property is non-configurable in older browsers, so ignore if this throws.
+        // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Function/name#browser_compatibility
+    }
+    /**
+     * A queuing strategy that counts the number of chunks.
+     *
+     * @public
+     */
+    class CountQueuingStrategy {
+        constructor(options) {
+            assertRequiredArgument(options, 1, 'CountQueuingStrategy');
+            options = convertQueuingStrategyInit(options, 'First parameter');
+            this._countQueuingStrategyHighWaterMark = options.highWaterMark;
+        }
+        /**
+         * Returns the high water mark provided to the constructor.
+         */
+        get highWaterMark() {
+            if (!IsCountQueuingStrategy(this)) {
+                throw countBrandCheckException('highWaterMark');
+            }
+            return this._countQueuingStrategyHighWaterMark;
+        }
+        /**
+         * Measures the size of `chunk` by always returning 1.
+         * This ensures that the total queue size is a count of the number of chunks in the queue.
+         */
+        get size() {
+            if (!IsCountQueuingStrategy(this)) {
+                throw countBrandCheckException('size');
+            }
+            return countSizeFunction;
+        }
+    }
+    Object.defineProperties(CountQueuingStrategy.prototype, {
+        highWaterMark: { enumerable: true },
+        size: { enumerable: true }
+    });
+    if (typeof SymbolPolyfill.toStringTag === 'symbol') {
+        Object.defineProperty(CountQueuingStrategy.prototype, SymbolPolyfill.toStringTag, {
+            value: 'CountQueuingStrategy',
+            configurable: true
+        });
+    }
+    // Helper functions for the CountQueuingStrategy.
+    function countBrandCheckException(name) {
+        return new TypeError(`CountQueuingStrategy.prototype.${name} can only be used on a CountQueuingStrategy`);
+    }
+    function IsCountQueuingStrategy(x) {
+        if (!typeIsObject(x)) {
+            return false;
+        }
+        if (!Object.prototype.hasOwnProperty.call(x, '_countQueuingStrategyHighWaterMark')) {
+            return false;
+        }
+        return x instanceof CountQueuingStrategy;
+    }
+
+    function convertTransformer(original, context) {
+        assertDictionary(original, context);
+        const flush = original === null || original === void 0 ? void 0 : original.flush;
+        const readableType = original === null || original === void 0 ? void 0 : original.readableType;
+        const start = original === null || original === void 0 ? void 0 : original.start;
+        const transform = original === null || original === void 0 ? void 0 : original.transform;
+        const writableType = original === null || original === void 0 ? void 0 : original.writableType;
+        return {
+            flush: flush === undefined ?
+                undefined :
+                convertTransformerFlushCallback(flush, original, `${context} has member 'flush' that`),
+            readableType,
+            start: start === undefined ?
+                undefined :
+                convertTransformerStartCallback(start, original, `${context} has member 'start' that`),
+            transform: transform === undefined ?
+                undefined :
+                convertTransformerTransformCallback(transform, original, `${context} has member 'transform' that`),
+            writableType
+        };
+    }
+    function convertTransformerFlushCallback(fn, original, context) {
+        assertFunction(fn, context);
+        return (controller) => promiseCall(fn, original, [controller]);
+    }
+    function convertTransformerStartCallback(fn, original, context) {
+        assertFunction(fn, context);
+        return (controller) => reflectCall(fn, original, [controller]);
+    }
+    function convertTransformerTransformCallback(fn, original, context) {
+        assertFunction(fn, context);
+        return (chunk, controller) => promiseCall(fn, original, [chunk, controller]);
+    }
+
+    // Class TransformStream
+    /**
+     * A transform stream consists of a pair of streams: a {@link WritableStream | writable stream},
+     * known as its writable side, and a {@link ReadableStream | readable stream}, known as its readable side.
+     * In a manner specific to the transform stream in question, writes to the writable side result in new data being
+     * made available for reading from the readable side.
+     *
+     * @public
+     */
+    class TransformStream {
+        constructor(rawTransformer = {}, rawWritableStrategy = {}, rawReadableStrategy = {}) {
+            if (rawTransformer === undefined) {
+                rawTransformer = null;
+            }
+            const writableStrategy = convertQueuingStrategy(rawWritableStrategy, 'Second parameter');
+            const readableStrategy = convertQueuingStrategy(rawReadableStrategy, 'Third parameter');
+            const transformer = convertTransformer(rawTransformer, 'First parameter');
+            if (transformer.readableType !== undefined) {
+                throw new RangeError('Invalid readableType specified');
+            }
+            if (transformer.writableType !== undefined) {
+                throw new RangeError('Invalid writableType specified');
+            }
+            const readableHighWaterMark = ExtractHighWaterMark(readableStrategy, 0);
+            const readableSizeAlgorithm = ExtractSizeAlgorithm(readableStrategy);
+            const writableHighWaterMark = ExtractHighWaterMark(writableStrategy, 1);
+            const writableSizeAlgorithm = ExtractSizeAlgorithm(writableStrategy);
+            let startPromise_resolve;
+            const startPromise = newPromise(resolve => {
+                startPromise_resolve = resolve;
+            });
+            InitializeTransformStream(this, startPromise, writableHighWaterMark, writableSizeAlgorithm, readableHighWaterMark, readableSizeAlgorithm);
+            SetUpTransformStreamDefaultControllerFromTransformer(this, transformer);
+            if (transformer.start !== undefined) {
+                startPromise_resolve(transformer.start(this._transformStreamController));
+            }
+            else {
+                startPromise_resolve(undefined);
+            }
+        }
+        /**
+         * The readable side of the transform stream.
+         */
+        get readable() {
+            if (!IsTransformStream(this)) {
+                throw streamBrandCheckException('readable');
+            }
+            return this._readable;
+        }
+        /**
+         * The writable side of the transform stream.
+         */
+        get writable() {
+            if (!IsTransformStream(this)) {
+                throw streamBrandCheckException('writable');
+            }
+            return this._writable;
+        }
+    }
+    Object.defineProperties(TransformStream.prototype, {
+        readable: { enumerable: true },
+        writable: { enumerable: true }
+    });
+    if (typeof SymbolPolyfill.toStringTag === 'symbol') {
+        Object.defineProperty(TransformStream.prototype, SymbolPolyfill.toStringTag, {
+            value: 'TransformStream',
+            configurable: true
+        });
+    }
+    function InitializeTransformStream(stream, startPromise, writableHighWaterMark, writableSizeAlgorithm, readableHighWaterMark, readableSizeAlgorithm) {
+        function startAlgorithm() {
+            return startPromise;
+        }
+        function writeAlgorithm(chunk) {
+            return TransformStreamDefaultSinkWriteAlgorithm(stream, chunk);
+        }
+        function abortAlgorithm(reason) {
+            return TransformStreamDefaultSinkAbortAlgorithm(stream, reason);
+        }
+        function closeAlgorithm() {
+            return TransformStreamDefaultSinkCloseAlgorithm(stream);
+        }
+        stream._writable = CreateWritableStream(startAlgorithm, writeAlgorithm, closeAlgorithm, abortAlgorithm, writableHighWaterMark, writableSizeAlgorithm);
+        function pullAlgorithm() {
+            return TransformStreamDefaultSourcePullAlgorithm(stream);
+        }
+        function cancelAlgorithm(reason) {
+            TransformStreamErrorWritableAndUnblockWrite(stream, reason);
+            return promiseResolvedWith(undefined);
+        }
+        stream._readable = CreateReadableStream(startAlgorithm, pullAlgorithm, cancelAlgorithm, readableHighWaterMark, readableSizeAlgorithm);
+        // The [[backpressure]] slot is set to undefined so that it can be initialised by TransformStreamSetBackpressure.
+        stream._backpressure = undefined;
+        stream._backpressureChangePromise = undefined;
+        stream._backpressureChangePromise_resolve = undefined;
+        TransformStreamSetBackpressure(stream, true);
+        stream._transformStreamController = undefined;
+    }
+    function IsTransformStream(x) {
+        if (!typeIsObject(x)) {
+            return false;
+        }
+        if (!Object.prototype.hasOwnProperty.call(x, '_transformStreamController')) {
+            return false;
+        }
+        return x instanceof TransformStream;
+    }
+    // This is a no-op if both sides are already errored.
+    function TransformStreamError(stream, e) {
+        ReadableStreamDefaultControllerError(stream._readable._readableStreamController, e);
+        TransformStreamErrorWritableAndUnblockWrite(stream, e);
+    }
+    function TransformStreamErrorWritableAndUnblockWrite(stream, e) {
+        TransformStreamDefaultControllerClearAlgorithms(stream._transformStreamController);
+        WritableStreamDefaultControllerErrorIfNeeded(stream._writable._writableStreamController, e);
+        if (stream._backpressure) {
+            // Pretend that pull() was called to permit any pending write() calls to complete. TransformStreamSetBackpressure()
+            // cannot be called from enqueue() or pull() once the ReadableStream is errored, so this will will be the final time
+            // _backpressure is set.
+            TransformStreamSetBackpressure(stream, false);
+        }
+    }
+    function TransformStreamSetBackpressure(stream, backpressure) {
+        // Passes also when called during construction.
+        if (stream._backpressureChangePromise !== undefined) {
+            stream._backpressureChangePromise_resolve();
+        }
+        stream._backpressureChangePromise = newPromise(resolve => {
+            stream._backpressureChangePromise_resolve = resolve;
+        });
+        stream._backpressure = backpressure;
+    }
+    // Class TransformStreamDefaultController
+    /**
+     * Allows control of the {@link ReadableStream} and {@link WritableStream} of the associated {@link TransformStream}.
+     *
+     * @public
+     */
+    class TransformStreamDefaultController {
+        constructor() {
+            throw new TypeError('Illegal constructor');
+        }
+        /**
+         * Returns the desired size to fill the readable side’s internal queue. It can be negative, if the queue is over-full.
+         */
+        get desiredSize() {
+            if (!IsTransformStreamDefaultController(this)) {
+                throw defaultControllerBrandCheckException('desiredSize');
+            }
+            const readableController = this._controlledTransformStream._readable._readableStreamController;
+            return ReadableStreamDefaultControllerGetDesiredSize(readableController);
+        }
+        enqueue(chunk = undefined) {
+            if (!IsTransformStreamDefaultController(this)) {
+                throw defaultControllerBrandCheckException('enqueue');
+            }
+            TransformStreamDefaultControllerEnqueue(this, chunk);
+        }
+        /**
+         * Errors both the readable side and the writable side of the controlled transform stream, making all future
+         * interactions with it fail with the given error `e`. Any chunks queued for transformation will be discarded.
+         */
+        error(reason = undefined) {
+            if (!IsTransformStreamDefaultController(this)) {
+                throw defaultControllerBrandCheckException('error');
+            }
+            TransformStreamDefaultControllerError(this, reason);
+        }
+        /**
+         * Closes the readable side and errors the writable side of the controlled transform stream. This is useful when the
+         * transformer only needs to consume a portion of the chunks written to the writable side.
+         */
+        terminate() {
+            if (!IsTransformStreamDefaultController(this)) {
+                throw defaultControllerBrandCheckException('terminate');
+            }
+            TransformStreamDefaultControllerTerminate(this);
+        }
+    }
+    Object.defineProperties(TransformStreamDefaultController.prototype, {
+        enqueue: { enumerable: true },
+        error: { enumerable: true },
+        terminate: { enumerable: true },
+        desiredSize: { enumerable: true }
+    });
+    if (typeof SymbolPolyfill.toStringTag === 'symbol') {
+        Object.defineProperty(TransformStreamDefaultController.prototype, SymbolPolyfill.toStringTag, {
+            value: 'TransformStreamDefaultController',
+            configurable: true
+        });
+    }
+    // Transform Stream Default Controller Abstract Operations
+    function IsTransformStreamDefaultController(x) {
+        if (!typeIsObject(x)) {
+            return false;
+        }
+        if (!Object.prototype.hasOwnProperty.call(x, '_controlledTransformStream')) {
+            return false;
+        }
+        return x instanceof TransformStreamDefaultController;
+    }
+    function SetUpTransformStreamDefaultController(stream, controller, transformAlgorithm, flushAlgorithm) {
+        controller._controlledTransformStream = stream;
+        stream._transformStreamController = controller;
+        controller._transformAlgorithm = transformAlgorithm;
+        controller._flushAlgorithm = flushAlgorithm;
+    }
+    function SetUpTransformStreamDefaultControllerFromTransformer(stream, transformer) {
+        const controller = Object.create(TransformStreamDefaultController.prototype);
+        let transformAlgorithm = (chunk) => {
+            try {
+                TransformStreamDefaultControllerEnqueue(controller, chunk);
+                return promiseResolvedWith(undefined);
+            }
+            catch (transformResultE) {
+                return promiseRejectedWith(transformResultE);
+            }
+        };
+        let flushAlgorithm = () => promiseResolvedWith(undefined);
+        if (transformer.transform !== undefined) {
+            transformAlgorithm = chunk => transformer.transform(chunk, controller);
+        }
+        if (transformer.flush !== undefined) {
+            flushAlgorithm = () => transformer.flush(controller);
+        }
+        SetUpTransformStreamDefaultController(stream, controller, transformAlgorithm, flushAlgorithm);
+    }
+    function TransformStreamDefaultControllerClearAlgorithms(controller) {
+        controller._transformAlgorithm = undefined;
+        controller._flushAlgorithm = undefined;
+    }
+    function TransformStreamDefaultControllerEnqueue(controller, chunk) {
+        const stream = controller._controlledTransformStream;
+        const readableController = stream._readable._readableStreamController;
+        if (!ReadableStreamDefaultControllerCanCloseOrEnqueue(readableController)) {
+            throw new TypeError('Readable side is not in a state that permits enqueue');
+        }
+        // We throttle transform invocations based on the backpressure of the ReadableStream, but we still
+        // accept TransformStreamDefaultControllerEnqueue() calls.
+        try {
+            ReadableStreamDefaultControllerEnqueue(readableController, chunk);
+        }
+        catch (e) {
+            // This happens when readableStrategy.size() throws.
+            TransformStreamErrorWritableAndUnblockWrite(stream, e);
+            throw stream._readable._storedError;
+        }
+        const backpressure = ReadableStreamDefaultControllerHasBackpressure(readableController);
+        if (backpressure !== stream._backpressure) {
+            TransformStreamSetBackpressure(stream, true);
+        }
+    }
+    function TransformStreamDefaultControllerError(controller, e) {
+        TransformStreamError(controller._controlledTransformStream, e);
+    }
+    function TransformStreamDefaultControllerPerformTransform(controller, chunk) {
+        const transformPromise = controller._transformAlgorithm(chunk);
+        return transformPromiseWith(transformPromise, undefined, r => {
+            TransformStreamError(controller._controlledTransformStream, r);
+            throw r;
+        });
+    }
+    function TransformStreamDefaultControllerTerminate(controller) {
+        const stream = controller._controlledTransformStream;
+        const readableController = stream._readable._readableStreamController;
+        ReadableStreamDefaultControllerClose(readableController);
+        const error = new TypeError('TransformStream terminated');
+        TransformStreamErrorWritableAndUnblockWrite(stream, error);
+    }
+    // TransformStreamDefaultSink Algorithms
+    function TransformStreamDefaultSinkWriteAlgorithm(stream, chunk) {
+        const controller = stream._transformStreamController;
+        if (stream._backpressure) {
+            const backpressureChangePromise = stream._backpressureChangePromise;
+            return transformPromiseWith(backpressureChangePromise, () => {
+                const writable = stream._writable;
+                const state = writable._state;
+                if (state === 'erroring') {
+                    throw writable._storedError;
+                }
+                return TransformStreamDefaultControllerPerformTransform(controller, chunk);
+            });
+        }
+        return TransformStreamDefaultControllerPerformTransform(controller, chunk);
+    }
+    function TransformStreamDefaultSinkAbortAlgorithm(stream, reason) {
+        // abort() is not called synchronously, so it is possible for abort() to be called when the stream is already
+        // errored.
+        TransformStreamError(stream, reason);
+        return promiseResolvedWith(undefined);
+    }
+    function TransformStreamDefaultSinkCloseAlgorithm(stream) {
+        // stream._readable cannot change after construction, so caching it across a call to user code is safe.
+        const readable = stream._readable;
+        const controller = stream._transformStreamController;
+        const flushPromise = controller._flushAlgorithm();
+        TransformStreamDefaultControllerClearAlgorithms(controller);
+        // Return a promise that is fulfilled with undefined on success.
+        return transformPromiseWith(flushPromise, () => {
+            if (readable._state === 'errored') {
+                throw readable._storedError;
+            }
+            ReadableStreamDefaultControllerClose(readable._readableStreamController);
+        }, r => {
+            TransformStreamError(stream, r);
+            throw readable._storedError;
+        });
+    }
+    // TransformStreamDefaultSource Algorithms
+    function TransformStreamDefaultSourcePullAlgorithm(stream) {
+        // Invariant. Enforced by the promises returned by start() and pull().
+        TransformStreamSetBackpressure(stream, false);
+        // Prevent the next pull() call until there is backpressure.
+        return stream._backpressureChangePromise;
+    }
+    // Helper functions for the TransformStreamDefaultController.
+    function defaultControllerBrandCheckException(name) {
+        return new TypeError(`TransformStreamDefaultController.prototype.${name} can only be used on a TransformStreamDefaultController`);
+    }
+    // Helper functions for the TransformStream.
+    function streamBrandCheckException(name) {
+        return new TypeError(`TransformStream.prototype.${name} can only be used on a TransformStream`);
+    }
+
+    exports.ByteLengthQueuingStrategy = ByteLengthQueuingStrategy;
+    exports.CountQueuingStrategy = CountQueuingStrategy;
+    exports.ReadableByteStreamController = ReadableByteStreamController;
+    exports.ReadableStream = ReadableStream;
+    exports.ReadableStreamBYOBReader = ReadableStreamBYOBReader;
+    exports.ReadableStreamBYOBRequest = ReadableStreamBYOBRequest;
+    exports.ReadableStreamDefaultController = ReadableStreamDefaultController;
+    exports.ReadableStreamDefaultReader = ReadableStreamDefaultReader;
+    exports.TransformStream = TransformStream;
+    exports.TransformStreamDefaultController = TransformStreamDefaultController;
+    exports.WritableStream = WritableStream;
+    exports.WritableStreamDefaultController = WritableStreamDefaultController;
+    exports.WritableStreamDefaultWriter = WritableStreamDefaultWriter;
+
+    Object.defineProperty(exports, '__esModule', { value: true });
+
+})));
+//# sourceMappingURL=ponyfill.es2018.js.map
+
+
+/***/ }),
+
 /***/ 9491:
 /***/ ((module) => {
 
@@ -6620,13 +13356,6 @@ module.exports = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("http");
 
 /***/ }),
 
-/***/ 5158:
-/***/ ((module) => {
-
-module.exports = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("http2");
-
-/***/ }),
-
 /***/ 5687:
 /***/ ((module) => {
 
@@ -6638,6 +13367,20 @@ module.exports = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("https");
 /***/ ((module) => {
 
 module.exports = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("net");
+
+/***/ }),
+
+/***/ 7742:
+/***/ ((module) => {
+
+module.exports = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:process");
+
+/***/ }),
+
+/***/ 2477:
+/***/ ((module) => {
+
+module.exports = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:stream/web");
 
 /***/ }),
 
@@ -6683,10 +13426,578 @@ module.exports = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("util");
 
 /***/ }),
 
-/***/ 9796:
+/***/ 1267:
 /***/ ((module) => {
 
-module.exports = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("zlib");
+module.exports = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("worker_threads");
+
+/***/ }),
+
+/***/ 8572:
+/***/ ((__unused_webpack_module, __unused_webpack_exports, __nccwpck_require__) => {
+
+/* c8 ignore start */
+// 64 KiB (same size chrome slice theirs blob into Uint8array's)
+const POOL_SIZE = 65536
+
+if (!globalThis.ReadableStream) {
+  // `node:stream/web` got introduced in v16.5.0 as experimental
+  // and it's preferred over the polyfilled version. So we also
+  // suppress the warning that gets emitted by NodeJS for using it.
+  try {
+    const process = __nccwpck_require__(7742)
+    const { emitWarning } = process
+    try {
+      process.emitWarning = () => {}
+      Object.assign(globalThis, __nccwpck_require__(2477))
+      process.emitWarning = emitWarning
+    } catch (error) {
+      process.emitWarning = emitWarning
+      throw error
+    }
+  } catch (error) {
+    // fallback to polyfill implementation
+    Object.assign(globalThis, __nccwpck_require__(1452))
+  }
+}
+
+try {
+  // Don't use node: prefix for this, require+node: is not supported until node v14.14
+  // Only `import()` can use prefix in 12.20 and later
+  const { Blob } = __nccwpck_require__(4300)
+  if (Blob && !Blob.prototype.stream) {
+    Blob.prototype.stream = function name (params) {
+      let position = 0
+      const blob = this
+
+      return new ReadableStream({
+        type: 'bytes',
+        async pull (ctrl) {
+          const chunk = blob.slice(position, Math.min(blob.size, position + POOL_SIZE))
+          const buffer = await chunk.arrayBuffer()
+          position += buffer.byteLength
+          ctrl.enqueue(new Uint8Array(buffer))
+
+          if (position === blob.size) {
+            ctrl.close()
+          }
+        }
+      })
+    }
+  }
+} catch (error) {}
+/* c8 ignore end */
+
+
+/***/ }),
+
+/***/ 3213:
+/***/ ((__unused_webpack___webpack_module__, __webpack_exports__, __nccwpck_require__) => {
+
+/* harmony export */ __nccwpck_require__.d(__webpack_exports__, {
+/* harmony export */   "Z": () => (__WEBPACK_DEFAULT_EXPORT__)
+/* harmony export */ });
+/* unused harmony export File */
+/* harmony import */ var _index_js__WEBPACK_IMPORTED_MODULE_0__ = __nccwpck_require__(1410);
+
+
+const _File = class File extends _index_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .Z {
+  #lastModified = 0
+  #name = ''
+
+  /**
+   * @param {*[]} fileBits
+   * @param {string} fileName
+   * @param {{lastModified?: number, type?: string}} options
+   */// @ts-ignore
+  constructor (fileBits, fileName, options = {}) {
+    if (arguments.length < 2) {
+      throw new TypeError(`Failed to construct 'File': 2 arguments required, but only ${arguments.length} present.`)
+    }
+    super(fileBits, options)
+
+    if (options === null) options = {}
+
+    // Simulate WebIDL type casting for NaN value in lastModified option.
+    const lastModified = options.lastModified === undefined ? Date.now() : Number(options.lastModified)
+    if (!Number.isNaN(lastModified)) {
+      this.#lastModified = lastModified
+    }
+
+    this.#name = String(fileName)
+  }
+
+  get name () {
+    return this.#name
+  }
+
+  get lastModified () {
+    return this.#lastModified
+  }
+
+  get [Symbol.toStringTag] () {
+    return 'File'
+  }
+
+  static [Symbol.hasInstance] (object) {
+    return !!object && object instanceof _index_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .Z &&
+      /^(File)$/.test(object[Symbol.toStringTag])
+  }
+}
+
+/** @type {typeof globalThis.File} */// @ts-ignore
+const File = _File
+/* harmony default export */ const __WEBPACK_DEFAULT_EXPORT__ = (File);
+
+
+/***/ }),
+
+/***/ 2777:
+/***/ ((__unused_webpack___webpack_module__, __webpack_exports__, __nccwpck_require__) => {
+
+
+// EXPORTS
+__nccwpck_require__.d(__webpack_exports__, {
+  "$B": () => (/* reexport */ file/* default */.Z)
+});
+
+// UNUSED EXPORTS: Blob, blobFrom, blobFromSync, default, fileFrom, fileFromSync
+
+;// CONCATENATED MODULE: external "node:fs"
+const external_node_fs_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:fs");
+;// CONCATENATED MODULE: external "node:path"
+const external_node_path_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:path");
+// EXTERNAL MODULE: ./node_modules/node-domexception/index.js
+var node_domexception = __nccwpck_require__(7760);
+// EXTERNAL MODULE: ./node_modules/fetch-blob/file.js
+var file = __nccwpck_require__(3213);
+// EXTERNAL MODULE: ./node_modules/fetch-blob/index.js
+var fetch_blob = __nccwpck_require__(1410);
+;// CONCATENATED MODULE: ./node_modules/fetch-blob/from.js
+
+
+
+
+
+
+
+const { stat } = external_node_fs_namespaceObject.promises
+
+/**
+ * @param {string} path filepath on the disk
+ * @param {string} [type] mimetype to use
+ */
+const blobFromSync = (path, type) => fromBlob(statSync(path), path, type)
+
+/**
+ * @param {string} path filepath on the disk
+ * @param {string} [type] mimetype to use
+ * @returns {Promise<Blob>}
+ */
+const blobFrom = (path, type) => stat(path).then(stat => fromBlob(stat, path, type))
+
+/**
+ * @param {string} path filepath on the disk
+ * @param {string} [type] mimetype to use
+ * @returns {Promise<File>}
+ */
+const fileFrom = (path, type) => stat(path).then(stat => fromFile(stat, path, type))
+
+/**
+ * @param {string} path filepath on the disk
+ * @param {string} [type] mimetype to use
+ */
+const fileFromSync = (path, type) => fromFile(statSync(path), path, type)
+
+// @ts-ignore
+const fromBlob = (stat, path, type = '') => new Blob([new BlobDataItem({
+  path,
+  size: stat.size,
+  lastModified: stat.mtimeMs,
+  start: 0
+})], { type })
+
+// @ts-ignore
+const fromFile = (stat, path, type = '') => new File([new BlobDataItem({
+  path,
+  size: stat.size,
+  lastModified: stat.mtimeMs,
+  start: 0
+})], basename(path), { type, lastModified: stat.mtimeMs })
+
+/**
+ * This is a blob backed up by a file on the disk
+ * with minium requirement. Its wrapped around a Blob as a blobPart
+ * so you have no direct access to this.
+ *
+ * @private
+ */
+class BlobDataItem {
+  #path
+  #start
+
+  constructor (options) {
+    this.#path = options.path
+    this.#start = options.start
+    this.size = options.size
+    this.lastModified = options.lastModified
+  }
+
+  /**
+   * Slicing arguments is first validated and formatted
+   * to not be out of range by Blob.prototype.slice
+   */
+  slice (start, end) {
+    return new BlobDataItem({
+      path: this.#path,
+      lastModified: this.lastModified,
+      size: end - start,
+      start: this.#start + start
+    })
+  }
+
+  async * stream () {
+    const { mtimeMs } = await stat(this.#path)
+    if (mtimeMs > this.lastModified) {
+      throw new DOMException('The requested file could not be read, typically due to permission problems that have occurred after a reference to a file was acquired.', 'NotReadableError')
+    }
+    yield * createReadStream(this.#path, {
+      start: this.#start,
+      end: this.#start + this.size - 1
+    })
+  }
+
+  get [Symbol.toStringTag] () {
+    return 'Blob'
+  }
+}
+
+/* harmony default export */ const from = ((/* unused pure expression or super */ null && (blobFromSync)));
+
+
+
+/***/ }),
+
+/***/ 1410:
+/***/ ((__unused_webpack___webpack_module__, __webpack_exports__, __nccwpck_require__) => {
+
+/* harmony export */ __nccwpck_require__.d(__webpack_exports__, {
+/* harmony export */   "Z": () => (__WEBPACK_DEFAULT_EXPORT__)
+/* harmony export */ });
+/* unused harmony export Blob */
+/* harmony import */ var _streams_cjs__WEBPACK_IMPORTED_MODULE_0__ = __nccwpck_require__(8572);
+/*! fetch-blob. MIT License. Jimmy Wärting <https://jimmy.warting.se/opensource> */
+
+// TODO (jimmywarting): in the feature use conditional loading with top level await (requires 14.x)
+// Node has recently added whatwg stream into core
+
+
+
+// 64 KiB (same size chrome slice theirs blob into Uint8array's)
+const POOL_SIZE = 65536
+
+/** @param {(Blob | Uint8Array)[]} parts */
+async function * toIterator (parts, clone = true) {
+  for (const part of parts) {
+    if ('stream' in part) {
+      yield * (/** @type {AsyncIterableIterator<Uint8Array>} */ (part.stream()))
+    } else if (ArrayBuffer.isView(part)) {
+      if (clone) {
+        let position = part.byteOffset
+        const end = part.byteOffset + part.byteLength
+        while (position !== end) {
+          const size = Math.min(end - position, POOL_SIZE)
+          const chunk = part.buffer.slice(position, position + size)
+          position += chunk.byteLength
+          yield new Uint8Array(chunk)
+        }
+      } else {
+        yield part
+      }
+    /* c8 ignore next 10 */
+    } else {
+      // For blobs that have arrayBuffer but no stream method (nodes buffer.Blob)
+      let position = 0, b = (/** @type {Blob} */ (part))
+      while (position !== b.size) {
+        const chunk = b.slice(position, Math.min(b.size, position + POOL_SIZE))
+        const buffer = await chunk.arrayBuffer()
+        position += buffer.byteLength
+        yield new Uint8Array(buffer)
+      }
+    }
+  }
+}
+
+const _Blob = class Blob {
+  /** @type {Array.<(Blob|Uint8Array)>} */
+  #parts = []
+  #type = ''
+  #size = 0
+  #endings = 'transparent'
+
+  /**
+   * The Blob() constructor returns a new Blob object. The content
+   * of the blob consists of the concatenation of the values given
+   * in the parameter array.
+   *
+   * @param {*} blobParts
+   * @param {{ type?: string, endings?: string }} [options]
+   */
+  constructor (blobParts = [], options = {}) {
+    if (typeof blobParts !== 'object' || blobParts === null) {
+      throw new TypeError('Failed to construct \'Blob\': The provided value cannot be converted to a sequence.')
+    }
+
+    if (typeof blobParts[Symbol.iterator] !== 'function') {
+      throw new TypeError('Failed to construct \'Blob\': The object must have a callable @@iterator property.')
+    }
+
+    if (typeof options !== 'object' && typeof options !== 'function') {
+      throw new TypeError('Failed to construct \'Blob\': parameter 2 cannot convert to dictionary.')
+    }
+
+    if (options === null) options = {}
+
+    const encoder = new TextEncoder()
+    for (const element of blobParts) {
+      let part
+      if (ArrayBuffer.isView(element)) {
+        part = new Uint8Array(element.buffer.slice(element.byteOffset, element.byteOffset + element.byteLength))
+      } else if (element instanceof ArrayBuffer) {
+        part = new Uint8Array(element.slice(0))
+      } else if (element instanceof Blob) {
+        part = element
+      } else {
+        part = encoder.encode(`${element}`)
+      }
+
+      this.#size += ArrayBuffer.isView(part) ? part.byteLength : part.size
+      this.#parts.push(part)
+    }
+
+    this.#endings = `${options.endings === undefined ? 'transparent' : options.endings}`
+    const type = options.type === undefined ? '' : String(options.type)
+    this.#type = /^[\x20-\x7E]*$/.test(type) ? type : ''
+  }
+
+  /**
+   * The Blob interface's size property returns the
+   * size of the Blob in bytes.
+   */
+  get size () {
+    return this.#size
+  }
+
+  /**
+   * The type property of a Blob object returns the MIME type of the file.
+   */
+  get type () {
+    return this.#type
+  }
+
+  /**
+   * The text() method in the Blob interface returns a Promise
+   * that resolves with a string containing the contents of
+   * the blob, interpreted as UTF-8.
+   *
+   * @return {Promise<string>}
+   */
+  async text () {
+    // More optimized than using this.arrayBuffer()
+    // that requires twice as much ram
+    const decoder = new TextDecoder()
+    let str = ''
+    for await (const part of toIterator(this.#parts, false)) {
+      str += decoder.decode(part, { stream: true })
+    }
+    // Remaining
+    str += decoder.decode()
+    return str
+  }
+
+  /**
+   * The arrayBuffer() method in the Blob interface returns a
+   * Promise that resolves with the contents of the blob as
+   * binary data contained in an ArrayBuffer.
+   *
+   * @return {Promise<ArrayBuffer>}
+   */
+  async arrayBuffer () {
+    // Easier way... Just a unnecessary overhead
+    // const view = new Uint8Array(this.size);
+    // await this.stream().getReader({mode: 'byob'}).read(view);
+    // return view.buffer;
+
+    const data = new Uint8Array(this.size)
+    let offset = 0
+    for await (const chunk of toIterator(this.#parts, false)) {
+      data.set(chunk, offset)
+      offset += chunk.length
+    }
+
+    return data.buffer
+  }
+
+  stream () {
+    const it = toIterator(this.#parts, true)
+
+    return new globalThis.ReadableStream({
+      // @ts-ignore
+      type: 'bytes',
+      async pull (ctrl) {
+        const chunk = await it.next()
+        chunk.done ? ctrl.close() : ctrl.enqueue(chunk.value)
+      },
+
+      async cancel () {
+        await it.return()
+      }
+    })
+  }
+
+  /**
+   * The Blob interface's slice() method creates and returns a
+   * new Blob object which contains data from a subset of the
+   * blob on which it's called.
+   *
+   * @param {number} [start]
+   * @param {number} [end]
+   * @param {string} [type]
+   */
+  slice (start = 0, end = this.size, type = '') {
+    const { size } = this
+
+    let relativeStart = start < 0 ? Math.max(size + start, 0) : Math.min(start, size)
+    let relativeEnd = end < 0 ? Math.max(size + end, 0) : Math.min(end, size)
+
+    const span = Math.max(relativeEnd - relativeStart, 0)
+    const parts = this.#parts
+    const blobParts = []
+    let added = 0
+
+    for (const part of parts) {
+      // don't add the overflow to new blobParts
+      if (added >= span) {
+        break
+      }
+
+      const size = ArrayBuffer.isView(part) ? part.byteLength : part.size
+      if (relativeStart && size <= relativeStart) {
+        // Skip the beginning and change the relative
+        // start & end position as we skip the unwanted parts
+        relativeStart -= size
+        relativeEnd -= size
+      } else {
+        let chunk
+        if (ArrayBuffer.isView(part)) {
+          chunk = part.subarray(relativeStart, Math.min(size, relativeEnd))
+          added += chunk.byteLength
+        } else {
+          chunk = part.slice(relativeStart, Math.min(size, relativeEnd))
+          added += chunk.size
+        }
+        relativeEnd -= size
+        blobParts.push(chunk)
+        relativeStart = 0 // All next sequential parts should start at 0
+      }
+    }
+
+    const blob = new Blob([], { type: String(type).toLowerCase() })
+    blob.#size = span
+    blob.#parts = blobParts
+
+    return blob
+  }
+
+  get [Symbol.toStringTag] () {
+    return 'Blob'
+  }
+
+  static [Symbol.hasInstance] (object) {
+    return (
+      object &&
+      typeof object === 'object' &&
+      typeof object.constructor === 'function' &&
+      (
+        typeof object.stream === 'function' ||
+        typeof object.arrayBuffer === 'function'
+      ) &&
+      /^(Blob|File)$/.test(object[Symbol.toStringTag])
+    )
+  }
+}
+
+Object.defineProperties(_Blob.prototype, {
+  size: { enumerable: true },
+  type: { enumerable: true },
+  slice: { enumerable: true }
+})
+
+/** @type {typeof globalThis.Blob} */
+const Blob = _Blob
+/* harmony default export */ const __WEBPACK_DEFAULT_EXPORT__ = (Blob);
+
+
+/***/ }),
+
+/***/ 8010:
+/***/ ((__unused_webpack___webpack_module__, __webpack_exports__, __nccwpck_require__) => {
+
+/* harmony export */ __nccwpck_require__.d(__webpack_exports__, {
+/* harmony export */   "Ct": () => (/* binding */ FormData),
+/* harmony export */   "au": () => (/* binding */ formDataToBlob)
+/* harmony export */ });
+/* unused harmony export File */
+/* harmony import */ var fetch_blob__WEBPACK_IMPORTED_MODULE_0__ = __nccwpck_require__(1410);
+/* harmony import */ var fetch_blob_file_js__WEBPACK_IMPORTED_MODULE_1__ = __nccwpck_require__(3213);
+/*! formdata-polyfill. MIT License. Jimmy Wärting <https://jimmy.warting.se/opensource> */
+
+
+
+
+var {toStringTag:t,iterator:i,hasInstance:h}=Symbol,
+r=Math.random,
+m='append,set,get,getAll,delete,keys,values,entries,forEach,constructor'.split(','),
+f=(a,b,c)=>(a+='',/^(Blob|File)$/.test(b && b[t])?[(c=c!==void 0?c+'':b[t]=='File'?b.name:'blob',a),b.name!==c||b[t]=='blob'?new fetch_blob_file_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .Z([b],c,b):b]:[a,b+'']),
+e=(c,f)=>(f?c:c.replace(/\r?\n|\r/g,'\r\n')).replace(/\n/g,'%0A').replace(/\r/g,'%0D').replace(/"/g,'%22'),
+x=(n, a, e)=>{if(a.length<e){throw new TypeError(`Failed to execute '${n}' on 'FormData': ${e} arguments required, but only ${a.length} present.`)}}
+
+const File = (/* unused pure expression or super */ null && (F))
+
+/** @type {typeof globalThis.FormData} */
+const FormData = class FormData {
+#d=[];
+constructor(...a){if(a.length)throw new TypeError(`Failed to construct 'FormData': parameter 1 is not of type 'HTMLFormElement'.`)}
+get [t]() {return 'FormData'}
+[i](){return this.entries()}
+static [h](o) {return o&&typeof o==='object'&&o[t]==='FormData'&&!m.some(m=>typeof o[m]!='function')}
+append(...a){x('append',arguments,2);this.#d.push(f(...a))}
+delete(a){x('delete',arguments,1);a+='';this.#d=this.#d.filter(([b])=>b!==a)}
+get(a){x('get',arguments,1);a+='';for(var b=this.#d,l=b.length,c=0;c<l;c++)if(b[c][0]===a)return b[c][1];return null}
+getAll(a,b){x('getAll',arguments,1);b=[];a+='';this.#d.forEach(c=>c[0]===a&&b.push(c[1]));return b}
+has(a){x('has',arguments,1);a+='';return this.#d.some(b=>b[0]===a)}
+forEach(a,b){x('forEach',arguments,1);for(var [c,d]of this)a.call(b,d,c,this)}
+set(...a){x('set',arguments,2);var b=[],c=!0;a=f(...a);this.#d.forEach(d=>{d[0]===a[0]?c&&(c=!b.push(a)):b.push(d)});c&&b.push(a);this.#d=b}
+*entries(){yield*this.#d}
+*keys(){for(var[a]of this)yield a}
+*values(){for(var[,a]of this)yield a}}
+
+/** @param {FormData} F */
+function formDataToBlob (F,B=fetch_blob__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .Z){
+var b=`${r()}${r()}`.replace(/\./g, '').slice(-28).padStart(32, '-'),c=[],p=`--${b}\r\nContent-Disposition: form-data; name="`
+F.forEach((v,n)=>typeof v=='string'
+?c.push(p+e(n)+`"\r\n\r\n${v.replace(/\r(?!\n)|(?<!\r)\n/g, '\r\n')}\r\n`)
+:c.push(p+e(n)+`"; filename="${e(v.name, 1)}"\r\nContent-Type: ${v.type||"application/octet-stream"}\r\n\r\n`, v, '\r\n'))
+c.push(`--${b}--`)
+return new B(c,{type:"multipart/form-data; boundary="+b})}
+
+
+/***/ }),
+
+/***/ 3765:
+/***/ ((module) => {
+
+module.exports = JSON.parse('{"application/1d-interleaved-parityfec":{"source":"iana"},"application/3gpdash-qoe-report+xml":{"source":"iana","charset":"UTF-8","compressible":true},"application/3gpp-ims+xml":{"source":"iana","compressible":true},"application/3gpphal+json":{"source":"iana","compressible":true},"application/3gpphalforms+json":{"source":"iana","compressible":true},"application/a2l":{"source":"iana"},"application/ace+cbor":{"source":"iana"},"application/activemessage":{"source":"iana"},"application/activity+json":{"source":"iana","compressible":true},"application/alto-costmap+json":{"source":"iana","compressible":true},"application/alto-costmapfilter+json":{"source":"iana","compressible":true},"application/alto-directory+json":{"source":"iana","compressible":true},"application/alto-endpointcost+json":{"source":"iana","compressible":true},"application/alto-endpointcostparams+json":{"source":"iana","compressible":true},"application/alto-endpointprop+json":{"source":"iana","compressible":true},"application/alto-endpointpropparams+json":{"source":"iana","compressible":true},"application/alto-error+json":{"source":"iana","compressible":true},"application/alto-networkmap+json":{"source":"iana","compressible":true},"application/alto-networkmapfilter+json":{"source":"iana","compressible":true},"application/alto-updatestreamcontrol+json":{"source":"iana","compressible":true},"application/alto-updatestreamparams+json":{"source":"iana","compressible":true},"application/aml":{"source":"iana"},"application/andrew-inset":{"source":"iana","extensions":["ez"]},"application/applefile":{"source":"iana"},"application/applixware":{"source":"apache","extensions":["aw"]},"application/at+jwt":{"source":"iana"},"application/atf":{"source":"iana"},"application/atfx":{"source":"iana"},"application/atom+xml":{"source":"iana","compressible":true,"extensions":["atom"]},"application/atomcat+xml":{"source":"iana","compressible":true,"extensions":["atomcat"]},"application/atomdeleted+xml":{"source":"iana","compressible":true,"extensions":["atomdeleted"]},"application/atomicmail":{"source":"iana"},"application/atomsvc+xml":{"source":"iana","compressible":true,"extensions":["atomsvc"]},"application/atsc-dwd+xml":{"source":"iana","compressible":true,"extensions":["dwd"]},"application/atsc-dynamic-event-message":{"source":"iana"},"application/atsc-held+xml":{"source":"iana","compressible":true,"extensions":["held"]},"application/atsc-rdt+json":{"source":"iana","compressible":true},"application/atsc-rsat+xml":{"source":"iana","compressible":true,"extensions":["rsat"]},"application/atxml":{"source":"iana"},"application/auth-policy+xml":{"source":"iana","compressible":true},"application/bacnet-xdd+zip":{"source":"iana","compressible":false},"application/batch-smtp":{"source":"iana"},"application/bdoc":{"compressible":false,"extensions":["bdoc"]},"application/beep+xml":{"source":"iana","charset":"UTF-8","compressible":true},"application/calendar+json":{"source":"iana","compressible":true},"application/calendar+xml":{"source":"iana","compressible":true,"extensions":["xcs"]},"application/call-completion":{"source":"iana"},"application/cals-1840":{"source":"iana"},"application/captive+json":{"source":"iana","compressible":true},"application/cbor":{"source":"iana"},"application/cbor-seq":{"source":"iana"},"application/cccex":{"source":"iana"},"application/ccmp+xml":{"source":"iana","compressible":true},"application/ccxml+xml":{"source":"iana","compressible":true,"extensions":["ccxml"]},"application/cdfx+xml":{"source":"iana","compressible":true,"extensions":["cdfx"]},"application/cdmi-capability":{"source":"iana","extensions":["cdmia"]},"application/cdmi-container":{"source":"iana","extensions":["cdmic"]},"application/cdmi-domain":{"source":"iana","extensions":["cdmid"]},"application/cdmi-object":{"source":"iana","extensions":["cdmio"]},"application/cdmi-queue":{"source":"iana","extensions":["cdmiq"]},"application/cdni":{"source":"iana"},"application/cea":{"source":"iana"},"application/cea-2018+xml":{"source":"iana","compressible":true},"application/cellml+xml":{"source":"iana","compressible":true},"application/cfw":{"source":"iana"},"application/clr":{"source":"iana"},"application/clue+xml":{"source":"iana","compressible":true},"application/clue_info+xml":{"source":"iana","compressible":true},"application/cms":{"source":"iana"},"application/cnrp+xml":{"source":"iana","compressible":true},"application/coap-group+json":{"source":"iana","compressible":true},"application/coap-payload":{"source":"iana"},"application/commonground":{"source":"iana"},"application/conference-info+xml":{"source":"iana","compressible":true},"application/cose":{"source":"iana"},"application/cose-key":{"source":"iana"},"application/cose-key-set":{"source":"iana"},"application/cpl+xml":{"source":"iana","compressible":true},"application/csrattrs":{"source":"iana"},"application/csta+xml":{"source":"iana","compressible":true},"application/cstadata+xml":{"source":"iana","compressible":true},"application/csvm+json":{"source":"iana","compressible":true},"application/cu-seeme":{"source":"apache","extensions":["cu"]},"application/cwt":{"source":"iana"},"application/cybercash":{"source":"iana"},"application/dart":{"compressible":true},"application/dash+xml":{"source":"iana","compressible":true,"extensions":["mpd"]},"application/dashdelta":{"source":"iana"},"application/davmount+xml":{"source":"iana","compressible":true,"extensions":["davmount"]},"application/dca-rft":{"source":"iana"},"application/dcd":{"source":"iana"},"application/dec-dx":{"source":"iana"},"application/dialog-info+xml":{"source":"iana","compressible":true},"application/dicom":{"source":"iana"},"application/dicom+json":{"source":"iana","compressible":true},"application/dicom+xml":{"source":"iana","compressible":true},"application/dii":{"source":"iana"},"application/dit":{"source":"iana"},"application/dns":{"source":"iana"},"application/dns+json":{"source":"iana","compressible":true},"application/dns-message":{"source":"iana"},"application/docbook+xml":{"source":"apache","compressible":true,"extensions":["dbk"]},"application/dots+cbor":{"source":"iana"},"application/dskpp+xml":{"source":"iana","compressible":true},"application/dssc+der":{"source":"iana","extensions":["dssc"]},"application/dssc+xml":{"source":"iana","compressible":true,"extensions":["xdssc"]},"application/dvcs":{"source":"iana"},"application/ecmascript":{"source":"iana","compressible":true,"extensions":["es","ecma"]},"application/edi-consent":{"source":"iana"},"application/edi-x12":{"source":"iana","compressible":false},"application/edifact":{"source":"iana","compressible":false},"application/efi":{"source":"iana"},"application/elm+json":{"source":"iana","charset":"UTF-8","compressible":true},"application/elm+xml":{"source":"iana","compressible":true},"application/emergencycalldata.cap+xml":{"source":"iana","charset":"UTF-8","compressible":true},"application/emergencycalldata.comment+xml":{"source":"iana","compressible":true},"application/emergencycalldata.control+xml":{"source":"iana","compressible":true},"application/emergencycalldata.deviceinfo+xml":{"source":"iana","compressible":true},"application/emergencycalldata.ecall.msd":{"source":"iana"},"application/emergencycalldata.providerinfo+xml":{"source":"iana","compressible":true},"application/emergencycalldata.serviceinfo+xml":{"source":"iana","compressible":true},"application/emergencycalldata.subscriberinfo+xml":{"source":"iana","compressible":true},"application/emergencycalldata.veds+xml":{"source":"iana","compressible":true},"application/emma+xml":{"source":"iana","compressible":true,"extensions":["emma"]},"application/emotionml+xml":{"source":"iana","compressible":true,"extensions":["emotionml"]},"application/encaprtp":{"source":"iana"},"application/epp+xml":{"source":"iana","compressible":true},"application/epub+zip":{"source":"iana","compressible":false,"extensions":["epub"]},"application/eshop":{"source":"iana"},"application/exi":{"source":"iana","extensions":["exi"]},"application/expect-ct-report+json":{"source":"iana","compressible":true},"application/express":{"source":"iana","extensions":["exp"]},"application/fastinfoset":{"source":"iana"},"application/fastsoap":{"source":"iana"},"application/fdt+xml":{"source":"iana","compressible":true,"extensions":["fdt"]},"application/fhir+json":{"source":"iana","charset":"UTF-8","compressible":true},"application/fhir+xml":{"source":"iana","charset":"UTF-8","compressible":true},"application/fido.trusted-apps+json":{"compressible":true},"application/fits":{"source":"iana"},"application/flexfec":{"source":"iana"},"application/font-sfnt":{"source":"iana"},"application/font-tdpfr":{"source":"iana","extensions":["pfr"]},"application/font-woff":{"source":"iana","compressible":false},"application/framework-attributes+xml":{"source":"iana","compressible":true},"application/geo+json":{"source":"iana","compressible":true,"extensions":["geojson"]},"application/geo+json-seq":{"source":"iana"},"application/geopackage+sqlite3":{"source":"iana"},"application/geoxacml+xml":{"source":"iana","compressible":true},"application/gltf-buffer":{"source":"iana"},"application/gml+xml":{"source":"iana","compressible":true,"extensions":["gml"]},"application/gpx+xml":{"source":"apache","compressible":true,"extensions":["gpx"]},"application/gxf":{"source":"apache","extensions":["gxf"]},"application/gzip":{"source":"iana","compressible":false,"extensions":["gz"]},"application/h224":{"source":"iana"},"application/held+xml":{"source":"iana","compressible":true},"application/hjson":{"extensions":["hjson"]},"application/http":{"source":"iana"},"application/hyperstudio":{"source":"iana","extensions":["stk"]},"application/ibe-key-request+xml":{"source":"iana","compressible":true},"application/ibe-pkg-reply+xml":{"source":"iana","compressible":true},"application/ibe-pp-data":{"source":"iana"},"application/iges":{"source":"iana"},"application/im-iscomposing+xml":{"source":"iana","charset":"UTF-8","compressible":true},"application/index":{"source":"iana"},"application/index.cmd":{"source":"iana"},"application/index.obj":{"source":"iana"},"application/index.response":{"source":"iana"},"application/index.vnd":{"source":"iana"},"application/inkml+xml":{"source":"iana","compressible":true,"extensions":["ink","inkml"]},"application/iotp":{"source":"iana"},"application/ipfix":{"source":"iana","extensions":["ipfix"]},"application/ipp":{"source":"iana"},"application/isup":{"source":"iana"},"application/its+xml":{"source":"iana","compressible":true,"extensions":["its"]},"application/java-archive":{"source":"apache","compressible":false,"extensions":["jar","war","ear"]},"application/java-serialized-object":{"source":"apache","compressible":false,"extensions":["ser"]},"application/java-vm":{"source":"apache","compressible":false,"extensions":["class"]},"application/javascript":{"source":"iana","charset":"UTF-8","compressible":true,"extensions":["js","mjs"]},"application/jf2feed+json":{"source":"iana","compressible":true},"application/jose":{"source":"iana"},"application/jose+json":{"source":"iana","compressible":true},"application/jrd+json":{"source":"iana","compressible":true},"application/jscalendar+json":{"source":"iana","compressible":true},"application/json":{"source":"iana","charset":"UTF-8","compressible":true,"extensions":["json","map"]},"application/json-patch+json":{"source":"iana","compressible":true},"application/json-seq":{"source":"iana"},"application/json5":{"extensions":["json5"]},"application/jsonml+json":{"source":"apache","compressible":true,"extensions":["jsonml"]},"application/jwk+json":{"source":"iana","compressible":true},"application/jwk-set+json":{"source":"iana","compressible":true},"application/jwt":{"source":"iana"},"application/kpml-request+xml":{"source":"iana","compressible":true},"application/kpml-response+xml":{"source":"iana","compressible":true},"application/ld+json":{"source":"iana","compressible":true,"extensions":["jsonld"]},"application/lgr+xml":{"source":"iana","compressible":true,"extensions":["lgr"]},"application/link-format":{"source":"iana"},"application/load-control+xml":{"source":"iana","compressible":true},"application/lost+xml":{"source":"iana","compressible":true,"extensions":["lostxml"]},"application/lostsync+xml":{"source":"iana","compressible":true},"application/lpf+zip":{"source":"iana","compressible":false},"application/lxf":{"source":"iana"},"application/mac-binhex40":{"source":"iana","extensions":["hqx"]},"application/mac-compactpro":{"source":"apache","extensions":["cpt"]},"application/macwriteii":{"source":"iana"},"application/mads+xml":{"source":"iana","compressible":true,"extensions":["mads"]},"application/manifest+json":{"source":"iana","charset":"UTF-8","compressible":true,"extensions":["webmanifest"]},"application/marc":{"source":"iana","extensions":["mrc"]},"application/marcxml+xml":{"source":"iana","compressible":true,"extensions":["mrcx"]},"application/mathematica":{"source":"iana","extensions":["ma","nb","mb"]},"application/mathml+xml":{"source":"iana","compressible":true,"extensions":["mathml"]},"application/mathml-content+xml":{"source":"iana","compressible":true},"application/mathml-presentation+xml":{"source":"iana","compressible":true},"application/mbms-associated-procedure-description+xml":{"source":"iana","compressible":true},"application/mbms-deregister+xml":{"source":"iana","compressible":true},"application/mbms-envelope+xml":{"source":"iana","compressible":true},"application/mbms-msk+xml":{"source":"iana","compressible":true},"application/mbms-msk-response+xml":{"source":"iana","compressible":true},"application/mbms-protection-description+xml":{"source":"iana","compressible":true},"application/mbms-reception-report+xml":{"source":"iana","compressible":true},"application/mbms-register+xml":{"source":"iana","compressible":true},"application/mbms-register-response+xml":{"source":"iana","compressible":true},"application/mbms-schedule+xml":{"source":"iana","compressible":true},"application/mbms-user-service-description+xml":{"source":"iana","compressible":true},"application/mbox":{"source":"iana","extensions":["mbox"]},"application/media-policy-dataset+xml":{"source":"iana","compressible":true},"application/media_control+xml":{"source":"iana","compressible":true},"application/mediaservercontrol+xml":{"source":"iana","compressible":true,"extensions":["mscml"]},"application/merge-patch+json":{"source":"iana","compressible":true},"application/metalink+xml":{"source":"apache","compressible":true,"extensions":["metalink"]},"application/metalink4+xml":{"source":"iana","compressible":true,"extensions":["meta4"]},"application/mets+xml":{"source":"iana","compressible":true,"extensions":["mets"]},"application/mf4":{"source":"iana"},"application/mikey":{"source":"iana"},"application/mipc":{"source":"iana"},"application/missing-blocks+cbor-seq":{"source":"iana"},"application/mmt-aei+xml":{"source":"iana","compressible":true,"extensions":["maei"]},"application/mmt-usd+xml":{"source":"iana","compressible":true,"extensions":["musd"]},"application/mods+xml":{"source":"iana","compressible":true,"extensions":["mods"]},"application/moss-keys":{"source":"iana"},"application/moss-signature":{"source":"iana"},"application/mosskey-data":{"source":"iana"},"application/mosskey-request":{"source":"iana"},"application/mp21":{"source":"iana","extensions":["m21","mp21"]},"application/mp4":{"source":"iana","extensions":["mp4s","m4p"]},"application/mpeg4-generic":{"source":"iana"},"application/mpeg4-iod":{"source":"iana"},"application/mpeg4-iod-xmt":{"source":"iana"},"application/mrb-consumer+xml":{"source":"iana","compressible":true},"application/mrb-publish+xml":{"source":"iana","compressible":true},"application/msc-ivr+xml":{"source":"iana","charset":"UTF-8","compressible":true},"application/msc-mixer+xml":{"source":"iana","charset":"UTF-8","compressible":true},"application/msword":{"source":"iana","compressible":false,"extensions":["doc","dot"]},"application/mud+json":{"source":"iana","compressible":true},"application/multipart-core":{"source":"iana"},"application/mxf":{"source":"iana","extensions":["mxf"]},"application/n-quads":{"source":"iana","extensions":["nq"]},"application/n-triples":{"source":"iana","extensions":["nt"]},"application/nasdata":{"source":"iana"},"application/news-checkgroups":{"source":"iana","charset":"US-ASCII"},"application/news-groupinfo":{"source":"iana","charset":"US-ASCII"},"application/news-transmission":{"source":"iana"},"application/nlsml+xml":{"source":"iana","compressible":true},"application/node":{"source":"iana","extensions":["cjs"]},"application/nss":{"source":"iana"},"application/oauth-authz-req+jwt":{"source":"iana"},"application/ocsp-request":{"source":"iana"},"application/ocsp-response":{"source":"iana"},"application/octet-stream":{"source":"iana","compressible":false,"extensions":["bin","dms","lrf","mar","so","dist","distz","pkg","bpk","dump","elc","deploy","exe","dll","deb","dmg","iso","img","msi","msp","msm","buffer"]},"application/oda":{"source":"iana","extensions":["oda"]},"application/odm+xml":{"source":"iana","compressible":true},"application/odx":{"source":"iana"},"application/oebps-package+xml":{"source":"iana","compressible":true,"extensions":["opf"]},"application/ogg":{"source":"iana","compressible":false,"extensions":["ogx"]},"application/omdoc+xml":{"source":"apache","compressible":true,"extensions":["omdoc"]},"application/onenote":{"source":"apache","extensions":["onetoc","onetoc2","onetmp","onepkg"]},"application/opc-nodeset+xml":{"source":"iana","compressible":true},"application/oscore":{"source":"iana"},"application/oxps":{"source":"iana","extensions":["oxps"]},"application/p21":{"source":"iana"},"application/p21+zip":{"source":"iana","compressible":false},"application/p2p-overlay+xml":{"source":"iana","compressible":true,"extensions":["relo"]},"application/parityfec":{"source":"iana"},"application/passport":{"source":"iana"},"application/patch-ops-error+xml":{"source":"iana","compressible":true,"extensions":["xer"]},"application/pdf":{"source":"iana","compressible":false,"extensions":["pdf"]},"application/pdx":{"source":"iana"},"application/pem-certificate-chain":{"source":"iana"},"application/pgp-encrypted":{"source":"iana","compressible":false,"extensions":["pgp"]},"application/pgp-keys":{"source":"iana"},"application/pgp-signature":{"source":"iana","extensions":["asc","sig"]},"application/pics-rules":{"source":"apache","extensions":["prf"]},"application/pidf+xml":{"source":"iana","charset":"UTF-8","compressible":true},"application/pidf-diff+xml":{"source":"iana","charset":"UTF-8","compressible":true},"application/pkcs10":{"source":"iana","extensions":["p10"]},"application/pkcs12":{"source":"iana"},"application/pkcs7-mime":{"source":"iana","extensions":["p7m","p7c"]},"application/pkcs7-signature":{"source":"iana","extensions":["p7s"]},"application/pkcs8":{"source":"iana","extensions":["p8"]},"application/pkcs8-encrypted":{"source":"iana"},"application/pkix-attr-cert":{"source":"iana","extensions":["ac"]},"application/pkix-cert":{"source":"iana","extensions":["cer"]},"application/pkix-crl":{"source":"iana","extensions":["crl"]},"application/pkix-pkipath":{"source":"iana","extensions":["pkipath"]},"application/pkixcmp":{"source":"iana","extensions":["pki"]},"application/pls+xml":{"source":"iana","compressible":true,"extensions":["pls"]},"application/poc-settings+xml":{"source":"iana","charset":"UTF-8","compressible":true},"application/postscript":{"source":"iana","compressible":true,"extensions":["ai","eps","ps"]},"application/ppsp-tracker+json":{"source":"iana","compressible":true},"application/problem+json":{"source":"iana","compressible":true},"application/problem+xml":{"source":"iana","compressible":true},"application/provenance+xml":{"source":"iana","compressible":true,"extensions":["provx"]},"application/prs.alvestrand.titrax-sheet":{"source":"iana"},"application/prs.cww":{"source":"iana","extensions":["cww"]},"application/prs.cyn":{"source":"iana","charset":"7-BIT"},"application/prs.hpub+zip":{"source":"iana","compressible":false},"application/prs.nprend":{"source":"iana"},"application/prs.plucker":{"source":"iana"},"application/prs.rdf-xml-crypt":{"source":"iana"},"application/prs.xsf+xml":{"source":"iana","compressible":true},"application/pskc+xml":{"source":"iana","compressible":true,"extensions":["pskcxml"]},"application/pvd+json":{"source":"iana","compressible":true},"application/qsig":{"source":"iana"},"application/raml+yaml":{"compressible":true,"extensions":["raml"]},"application/raptorfec":{"source":"iana"},"application/rdap+json":{"source":"iana","compressible":true},"application/rdf+xml":{"source":"iana","compressible":true,"extensions":["rdf","owl"]},"application/reginfo+xml":{"source":"iana","compressible":true,"extensions":["rif"]},"application/relax-ng-compact-syntax":{"source":"iana","extensions":["rnc"]},"application/remote-printing":{"source":"iana"},"application/reputon+json":{"source":"iana","compressible":true},"application/resource-lists+xml":{"source":"iana","compressible":true,"extensions":["rl"]},"application/resource-lists-diff+xml":{"source":"iana","compressible":true,"extensions":["rld"]},"application/rfc+xml":{"source":"iana","compressible":true},"application/riscos":{"source":"iana"},"application/rlmi+xml":{"source":"iana","compressible":true},"application/rls-services+xml":{"source":"iana","compressible":true,"extensions":["rs"]},"application/route-apd+xml":{"source":"iana","compressible":true,"extensions":["rapd"]},"application/route-s-tsid+xml":{"source":"iana","compressible":true,"extensions":["sls"]},"application/route-usd+xml":{"source":"iana","compressible":true,"extensions":["rusd"]},"application/rpki-ghostbusters":{"source":"iana","extensions":["gbr"]},"application/rpki-manifest":{"source":"iana","extensions":["mft"]},"application/rpki-publication":{"source":"iana"},"application/rpki-roa":{"source":"iana","extensions":["roa"]},"application/rpki-updown":{"source":"iana"},"application/rsd+xml":{"source":"apache","compressible":true,"extensions":["rsd"]},"application/rss+xml":{"source":"apache","compressible":true,"extensions":["rss"]},"application/rtf":{"source":"iana","compressible":true,"extensions":["rtf"]},"application/rtploopback":{"source":"iana"},"application/rtx":{"source":"iana"},"application/samlassertion+xml":{"source":"iana","compressible":true},"application/samlmetadata+xml":{"source":"iana","compressible":true},"application/sarif+json":{"source":"iana","compressible":true},"application/sarif-external-properties+json":{"source":"iana","compressible":true},"application/sbe":{"source":"iana"},"application/sbml+xml":{"source":"iana","compressible":true,"extensions":["sbml"]},"application/scaip+xml":{"source":"iana","compressible":true},"application/scim+json":{"source":"iana","compressible":true},"application/scvp-cv-request":{"source":"iana","extensions":["scq"]},"application/scvp-cv-response":{"source":"iana","extensions":["scs"]},"application/scvp-vp-request":{"source":"iana","extensions":["spq"]},"application/scvp-vp-response":{"source":"iana","extensions":["spp"]},"application/sdp":{"source":"iana","extensions":["sdp"]},"application/secevent+jwt":{"source":"iana"},"application/senml+cbor":{"source":"iana"},"application/senml+json":{"source":"iana","compressible":true},"application/senml+xml":{"source":"iana","compressible":true,"extensions":["senmlx"]},"application/senml-etch+cbor":{"source":"iana"},"application/senml-etch+json":{"source":"iana","compressible":true},"application/senml-exi":{"source":"iana"},"application/sensml+cbor":{"source":"iana"},"application/sensml+json":{"source":"iana","compressible":true},"application/sensml+xml":{"source":"iana","compressible":true,"extensions":["sensmlx"]},"application/sensml-exi":{"source":"iana"},"application/sep+xml":{"source":"iana","compressible":true},"application/sep-exi":{"source":"iana"},"application/session-info":{"source":"iana"},"application/set-payment":{"source":"iana"},"application/set-payment-initiation":{"source":"iana","extensions":["setpay"]},"application/set-registration":{"source":"iana"},"application/set-registration-initiation":{"source":"iana","extensions":["setreg"]},"application/sgml":{"source":"iana"},"application/sgml-open-catalog":{"source":"iana"},"application/shf+xml":{"source":"iana","compressible":true,"extensions":["shf"]},"application/sieve":{"source":"iana","extensions":["siv","sieve"]},"application/simple-filter+xml":{"source":"iana","compressible":true},"application/simple-message-summary":{"source":"iana"},"application/simplesymbolcontainer":{"source":"iana"},"application/sipc":{"source":"iana"},"application/slate":{"source":"iana"},"application/smil":{"source":"iana"},"application/smil+xml":{"source":"iana","compressible":true,"extensions":["smi","smil"]},"application/smpte336m":{"source":"iana"},"application/soap+fastinfoset":{"source":"iana"},"application/soap+xml":{"source":"iana","compressible":true},"application/sparql-query":{"source":"iana","extensions":["rq"]},"application/sparql-results+xml":{"source":"iana","compressible":true,"extensions":["srx"]},"application/spirits-event+xml":{"source":"iana","compressible":true},"application/sql":{"source":"iana"},"application/srgs":{"source":"iana","extensions":["gram"]},"application/srgs+xml":{"source":"iana","compressible":true,"extensions":["grxml"]},"application/sru+xml":{"source":"iana","compressible":true,"extensions":["sru"]},"application/ssdl+xml":{"source":"apache","compressible":true,"extensions":["ssdl"]},"application/ssml+xml":{"source":"iana","compressible":true,"extensions":["ssml"]},"application/stix+json":{"source":"iana","compressible":true},"application/swid+xml":{"source":"iana","compressible":true,"extensions":["swidtag"]},"application/tamp-apex-update":{"source":"iana"},"application/tamp-apex-update-confirm":{"source":"iana"},"application/tamp-community-update":{"source":"iana"},"application/tamp-community-update-confirm":{"source":"iana"},"application/tamp-error":{"source":"iana"},"application/tamp-sequence-adjust":{"source":"iana"},"application/tamp-sequence-adjust-confirm":{"source":"iana"},"application/tamp-status-query":{"source":"iana"},"application/tamp-status-response":{"source":"iana"},"application/tamp-update":{"source":"iana"},"application/tamp-update-confirm":{"source":"iana"},"application/tar":{"compressible":true},"application/taxii+json":{"source":"iana","compressible":true},"application/td+json":{"source":"iana","compressible":true},"application/tei+xml":{"source":"iana","compressible":true,"extensions":["tei","teicorpus"]},"application/tetra_isi":{"source":"iana"},"application/thraud+xml":{"source":"iana","compressible":true,"extensions":["tfi"]},"application/timestamp-query":{"source":"iana"},"application/timestamp-reply":{"source":"iana"},"application/timestamped-data":{"source":"iana","extensions":["tsd"]},"application/tlsrpt+gzip":{"source":"iana"},"application/tlsrpt+json":{"source":"iana","compressible":true},"application/tnauthlist":{"source":"iana"},"application/token-introspection+jwt":{"source":"iana"},"application/toml":{"compressible":true,"extensions":["toml"]},"application/trickle-ice-sdpfrag":{"source":"iana"},"application/trig":{"source":"iana","extensions":["trig"]},"application/ttml+xml":{"source":"iana","compressible":true,"extensions":["ttml"]},"application/tve-trigger":{"source":"iana"},"application/tzif":{"source":"iana"},"application/tzif-leap":{"source":"iana"},"application/ubjson":{"compressible":false,"extensions":["ubj"]},"application/ulpfec":{"source":"iana"},"application/urc-grpsheet+xml":{"source":"iana","compressible":true},"application/urc-ressheet+xml":{"source":"iana","compressible":true,"extensions":["rsheet"]},"application/urc-targetdesc+xml":{"source":"iana","compressible":true,"extensions":["td"]},"application/urc-uisocketdesc+xml":{"source":"iana","compressible":true},"application/vcard+json":{"source":"iana","compressible":true},"application/vcard+xml":{"source":"iana","compressible":true},"application/vemmi":{"source":"iana"},"application/vividence.scriptfile":{"source":"apache"},"application/vnd.1000minds.decision-model+xml":{"source":"iana","compressible":true,"extensions":["1km"]},"application/vnd.3gpp-prose+xml":{"source":"iana","compressible":true},"application/vnd.3gpp-prose-pc3ch+xml":{"source":"iana","compressible":true},"application/vnd.3gpp-v2x-local-service-information":{"source":"iana"},"application/vnd.3gpp.5gnas":{"source":"iana"},"application/vnd.3gpp.access-transfer-events+xml":{"source":"iana","compressible":true},"application/vnd.3gpp.bsf+xml":{"source":"iana","compressible":true},"application/vnd.3gpp.gmop+xml":{"source":"iana","compressible":true},"application/vnd.3gpp.gtpc":{"source":"iana"},"application/vnd.3gpp.interworking-data":{"source":"iana"},"application/vnd.3gpp.lpp":{"source":"iana"},"application/vnd.3gpp.mc-signalling-ear":{"source":"iana"},"application/vnd.3gpp.mcdata-affiliation-command+xml":{"source":"iana","compressible":true},"application/vnd.3gpp.mcdata-info+xml":{"source":"iana","compressible":true},"application/vnd.3gpp.mcdata-payload":{"source":"iana"},"application/vnd.3gpp.mcdata-service-config+xml":{"source":"iana","compressible":true},"application/vnd.3gpp.mcdata-signalling":{"source":"iana"},"application/vnd.3gpp.mcdata-ue-config+xml":{"source":"iana","compressible":true},"application/vnd.3gpp.mcdata-user-profile+xml":{"source":"iana","compressible":true},"application/vnd.3gpp.mcptt-affiliation-command+xml":{"source":"iana","compressible":true},"application/vnd.3gpp.mcptt-floor-request+xml":{"source":"iana","compressible":true},"application/vnd.3gpp.mcptt-info+xml":{"source":"iana","compressible":true},"application/vnd.3gpp.mcptt-location-info+xml":{"source":"iana","compressible":true},"application/vnd.3gpp.mcptt-mbms-usage-info+xml":{"source":"iana","compressible":true},"application/vnd.3gpp.mcptt-service-config+xml":{"source":"iana","compressible":true},"application/vnd.3gpp.mcptt-signed+xml":{"source":"iana","compressible":true},"application/vnd.3gpp.mcptt-ue-config+xml":{"source":"iana","compressible":true},"application/vnd.3gpp.mcptt-ue-init-config+xml":{"source":"iana","compressible":true},"application/vnd.3gpp.mcptt-user-profile+xml":{"source":"iana","compressible":true},"application/vnd.3gpp.mcvideo-affiliation-command+xml":{"source":"iana","compressible":true},"application/vnd.3gpp.mcvideo-affiliation-info+xml":{"source":"iana","compressible":true},"application/vnd.3gpp.mcvideo-info+xml":{"source":"iana","compressible":true},"application/vnd.3gpp.mcvideo-location-info+xml":{"source":"iana","compressible":true},"application/vnd.3gpp.mcvideo-mbms-usage-info+xml":{"source":"iana","compressible":true},"application/vnd.3gpp.mcvideo-service-config+xml":{"source":"iana","compressible":true},"application/vnd.3gpp.mcvideo-transmission-request+xml":{"source":"iana","compressible":true},"application/vnd.3gpp.mcvideo-ue-config+xml":{"source":"iana","compressible":true},"application/vnd.3gpp.mcvideo-user-profile+xml":{"source":"iana","compressible":true},"application/vnd.3gpp.mid-call+xml":{"source":"iana","compressible":true},"application/vnd.3gpp.ngap":{"source":"iana"},"application/vnd.3gpp.pfcp":{"source":"iana"},"application/vnd.3gpp.pic-bw-large":{"source":"iana","extensions":["plb"]},"application/vnd.3gpp.pic-bw-small":{"source":"iana","extensions":["psb"]},"application/vnd.3gpp.pic-bw-var":{"source":"iana","extensions":["pvb"]},"application/vnd.3gpp.s1ap":{"source":"iana"},"application/vnd.3gpp.sms":{"source":"iana"},"application/vnd.3gpp.sms+xml":{"source":"iana","compressible":true},"application/vnd.3gpp.srvcc-ext+xml":{"source":"iana","compressible":true},"application/vnd.3gpp.srvcc-info+xml":{"source":"iana","compressible":true},"application/vnd.3gpp.state-and-event-info+xml":{"source":"iana","compressible":true},"application/vnd.3gpp.ussd+xml":{"source":"iana","compressible":true},"application/vnd.3gpp2.bcmcsinfo+xml":{"source":"iana","compressible":true},"application/vnd.3gpp2.sms":{"source":"iana"},"application/vnd.3gpp2.tcap":{"source":"iana","extensions":["tcap"]},"application/vnd.3lightssoftware.imagescal":{"source":"iana"},"application/vnd.3m.post-it-notes":{"source":"iana","extensions":["pwn"]},"application/vnd.accpac.simply.aso":{"source":"iana","extensions":["aso"]},"application/vnd.accpac.simply.imp":{"source":"iana","extensions":["imp"]},"application/vnd.acucobol":{"source":"iana","extensions":["acu"]},"application/vnd.acucorp":{"source":"iana","extensions":["atc","acutc"]},"application/vnd.adobe.air-application-installer-package+zip":{"source":"apache","compressible":false,"extensions":["air"]},"application/vnd.adobe.flash.movie":{"source":"iana"},"application/vnd.adobe.formscentral.fcdt":{"source":"iana","extensions":["fcdt"]},"application/vnd.adobe.fxp":{"source":"iana","extensions":["fxp","fxpl"]},"application/vnd.adobe.partial-upload":{"source":"iana"},"application/vnd.adobe.xdp+xml":{"source":"iana","compressible":true,"extensions":["xdp"]},"application/vnd.adobe.xfdf":{"source":"iana","extensions":["xfdf"]},"application/vnd.aether.imp":{"source":"iana"},"application/vnd.afpc.afplinedata":{"source":"iana"},"application/vnd.afpc.afplinedata-pagedef":{"source":"iana"},"application/vnd.afpc.cmoca-cmresource":{"source":"iana"},"application/vnd.afpc.foca-charset":{"source":"iana"},"application/vnd.afpc.foca-codedfont":{"source":"iana"},"application/vnd.afpc.foca-codepage":{"source":"iana"},"application/vnd.afpc.modca":{"source":"iana"},"application/vnd.afpc.modca-cmtable":{"source":"iana"},"application/vnd.afpc.modca-formdef":{"source":"iana"},"application/vnd.afpc.modca-mediummap":{"source":"iana"},"application/vnd.afpc.modca-objectcontainer":{"source":"iana"},"application/vnd.afpc.modca-overlay":{"source":"iana"},"application/vnd.afpc.modca-pagesegment":{"source":"iana"},"application/vnd.ah-barcode":{"source":"iana"},"application/vnd.ahead.space":{"source":"iana","extensions":["ahead"]},"application/vnd.airzip.filesecure.azf":{"source":"iana","extensions":["azf"]},"application/vnd.airzip.filesecure.azs":{"source":"iana","extensions":["azs"]},"application/vnd.amadeus+json":{"source":"iana","compressible":true},"application/vnd.amazon.ebook":{"source":"apache","extensions":["azw"]},"application/vnd.amazon.mobi8-ebook":{"source":"iana"},"application/vnd.americandynamics.acc":{"source":"iana","extensions":["acc"]},"application/vnd.amiga.ami":{"source":"iana","extensions":["ami"]},"application/vnd.amundsen.maze+xml":{"source":"iana","compressible":true},"application/vnd.android.ota":{"source":"iana"},"application/vnd.android.package-archive":{"source":"apache","compressible":false,"extensions":["apk"]},"application/vnd.anki":{"source":"iana"},"application/vnd.anser-web-certificate-issue-initiation":{"source":"iana","extensions":["cii"]},"application/vnd.anser-web-funds-transfer-initiation":{"source":"apache","extensions":["fti"]},"application/vnd.antix.game-component":{"source":"iana","extensions":["atx"]},"application/vnd.apache.arrow.file":{"source":"iana"},"application/vnd.apache.arrow.stream":{"source":"iana"},"application/vnd.apache.thrift.binary":{"source":"iana"},"application/vnd.apache.thrift.compact":{"source":"iana"},"application/vnd.apache.thrift.json":{"source":"iana"},"application/vnd.api+json":{"source":"iana","compressible":true},"application/vnd.aplextor.warrp+json":{"source":"iana","compressible":true},"application/vnd.apothekende.reservation+json":{"source":"iana","compressible":true},"application/vnd.apple.installer+xml":{"source":"iana","compressible":true,"extensions":["mpkg"]},"application/vnd.apple.keynote":{"source":"iana","extensions":["key"]},"application/vnd.apple.mpegurl":{"source":"iana","extensions":["m3u8"]},"application/vnd.apple.numbers":{"source":"iana","extensions":["numbers"]},"application/vnd.apple.pages":{"source":"iana","extensions":["pages"]},"application/vnd.apple.pkpass":{"compressible":false,"extensions":["pkpass"]},"application/vnd.arastra.swi":{"source":"iana"},"application/vnd.aristanetworks.swi":{"source":"iana","extensions":["swi"]},"application/vnd.artisan+json":{"source":"iana","compressible":true},"application/vnd.artsquare":{"source":"iana"},"application/vnd.astraea-software.iota":{"source":"iana","extensions":["iota"]},"application/vnd.audiograph":{"source":"iana","extensions":["aep"]},"application/vnd.autopackage":{"source":"iana"},"application/vnd.avalon+json":{"source":"iana","compressible":true},"application/vnd.avistar+xml":{"source":"iana","compressible":true},"application/vnd.balsamiq.bmml+xml":{"source":"iana","compressible":true,"extensions":["bmml"]},"application/vnd.balsamiq.bmpr":{"source":"iana"},"application/vnd.banana-accounting":{"source":"iana"},"application/vnd.bbf.usp.error":{"source":"iana"},"application/vnd.bbf.usp.msg":{"source":"iana"},"application/vnd.bbf.usp.msg+json":{"source":"iana","compressible":true},"application/vnd.bekitzur-stech+json":{"source":"iana","compressible":true},"application/vnd.bint.med-content":{"source":"iana"},"application/vnd.biopax.rdf+xml":{"source":"iana","compressible":true},"application/vnd.blink-idb-value-wrapper":{"source":"iana"},"application/vnd.blueice.multipass":{"source":"iana","extensions":["mpm"]},"application/vnd.bluetooth.ep.oob":{"source":"iana"},"application/vnd.bluetooth.le.oob":{"source":"iana"},"application/vnd.bmi":{"source":"iana","extensions":["bmi"]},"application/vnd.bpf":{"source":"iana"},"application/vnd.bpf3":{"source":"iana"},"application/vnd.businessobjects":{"source":"iana","extensions":["rep"]},"application/vnd.byu.uapi+json":{"source":"iana","compressible":true},"application/vnd.cab-jscript":{"source":"iana"},"application/vnd.canon-cpdl":{"source":"iana"},"application/vnd.canon-lips":{"source":"iana"},"application/vnd.capasystems-pg+json":{"source":"iana","compressible":true},"application/vnd.cendio.thinlinc.clientconf":{"source":"iana"},"application/vnd.century-systems.tcp_stream":{"source":"iana"},"application/vnd.chemdraw+xml":{"source":"iana","compressible":true,"extensions":["cdxml"]},"application/vnd.chess-pgn":{"source":"iana"},"application/vnd.chipnuts.karaoke-mmd":{"source":"iana","extensions":["mmd"]},"application/vnd.ciedi":{"source":"iana"},"application/vnd.cinderella":{"source":"iana","extensions":["cdy"]},"application/vnd.cirpack.isdn-ext":{"source":"iana"},"application/vnd.citationstyles.style+xml":{"source":"iana","compressible":true,"extensions":["csl"]},"application/vnd.claymore":{"source":"iana","extensions":["cla"]},"application/vnd.cloanto.rp9":{"source":"iana","extensions":["rp9"]},"application/vnd.clonk.c4group":{"source":"iana","extensions":["c4g","c4d","c4f","c4p","c4u"]},"application/vnd.cluetrust.cartomobile-config":{"source":"iana","extensions":["c11amc"]},"application/vnd.cluetrust.cartomobile-config-pkg":{"source":"iana","extensions":["c11amz"]},"application/vnd.coffeescript":{"source":"iana"},"application/vnd.collabio.xodocuments.document":{"source":"iana"},"application/vnd.collabio.xodocuments.document-template":{"source":"iana"},"application/vnd.collabio.xodocuments.presentation":{"source":"iana"},"application/vnd.collabio.xodocuments.presentation-template":{"source":"iana"},"application/vnd.collabio.xodocuments.spreadsheet":{"source":"iana"},"application/vnd.collabio.xodocuments.spreadsheet-template":{"source":"iana"},"application/vnd.collection+json":{"source":"iana","compressible":true},"application/vnd.collection.doc+json":{"source":"iana","compressible":true},"application/vnd.collection.next+json":{"source":"iana","compressible":true},"application/vnd.comicbook+zip":{"source":"iana","compressible":false},"application/vnd.comicbook-rar":{"source":"iana"},"application/vnd.commerce-battelle":{"source":"iana"},"application/vnd.commonspace":{"source":"iana","extensions":["csp"]},"application/vnd.contact.cmsg":{"source":"iana","extensions":["cdbcmsg"]},"application/vnd.coreos.ignition+json":{"source":"iana","compressible":true},"application/vnd.cosmocaller":{"source":"iana","extensions":["cmc"]},"application/vnd.crick.clicker":{"source":"iana","extensions":["clkx"]},"application/vnd.crick.clicker.keyboard":{"source":"iana","extensions":["clkk"]},"application/vnd.crick.clicker.palette":{"source":"iana","extensions":["clkp"]},"application/vnd.crick.clicker.template":{"source":"iana","extensions":["clkt"]},"application/vnd.crick.clicker.wordbank":{"source":"iana","extensions":["clkw"]},"application/vnd.criticaltools.wbs+xml":{"source":"iana","compressible":true,"extensions":["wbs"]},"application/vnd.cryptii.pipe+json":{"source":"iana","compressible":true},"application/vnd.crypto-shade-file":{"source":"iana"},"application/vnd.cryptomator.encrypted":{"source":"iana"},"application/vnd.cryptomator.vault":{"source":"iana"},"application/vnd.ctc-posml":{"source":"iana","extensions":["pml"]},"application/vnd.ctct.ws+xml":{"source":"iana","compressible":true},"application/vnd.cups-pdf":{"source":"iana"},"application/vnd.cups-postscript":{"source":"iana"},"application/vnd.cups-ppd":{"source":"iana","extensions":["ppd"]},"application/vnd.cups-raster":{"source":"iana"},"application/vnd.cups-raw":{"source":"iana"},"application/vnd.curl":{"source":"iana"},"application/vnd.curl.car":{"source":"apache","extensions":["car"]},"application/vnd.curl.pcurl":{"source":"apache","extensions":["pcurl"]},"application/vnd.cyan.dean.root+xml":{"source":"iana","compressible":true},"application/vnd.cybank":{"source":"iana"},"application/vnd.cyclonedx+json":{"source":"iana","compressible":true},"application/vnd.cyclonedx+xml":{"source":"iana","compressible":true},"application/vnd.d2l.coursepackage1p0+zip":{"source":"iana","compressible":false},"application/vnd.d3m-dataset":{"source":"iana"},"application/vnd.d3m-problem":{"source":"iana"},"application/vnd.dart":{"source":"iana","compressible":true,"extensions":["dart"]},"application/vnd.data-vision.rdz":{"source":"iana","extensions":["rdz"]},"application/vnd.datapackage+json":{"source":"iana","compressible":true},"application/vnd.dataresource+json":{"source":"iana","compressible":true},"application/vnd.dbf":{"source":"iana","extensions":["dbf"]},"application/vnd.debian.binary-package":{"source":"iana"},"application/vnd.dece.data":{"source":"iana","extensions":["uvf","uvvf","uvd","uvvd"]},"application/vnd.dece.ttml+xml":{"source":"iana","compressible":true,"extensions":["uvt","uvvt"]},"application/vnd.dece.unspecified":{"source":"iana","extensions":["uvx","uvvx"]},"application/vnd.dece.zip":{"source":"iana","extensions":["uvz","uvvz"]},"application/vnd.denovo.fcselayout-link":{"source":"iana","extensions":["fe_launch"]},"application/vnd.desmume.movie":{"source":"iana"},"application/vnd.dir-bi.plate-dl-nosuffix":{"source":"iana"},"application/vnd.dm.delegation+xml":{"source":"iana","compressible":true},"application/vnd.dna":{"source":"iana","extensions":["dna"]},"application/vnd.document+json":{"source":"iana","compressible":true},"application/vnd.dolby.mlp":{"source":"apache","extensions":["mlp"]},"application/vnd.dolby.mobile.1":{"source":"iana"},"application/vnd.dolby.mobile.2":{"source":"iana"},"application/vnd.doremir.scorecloud-binary-document":{"source":"iana"},"application/vnd.dpgraph":{"source":"iana","extensions":["dpg"]},"application/vnd.dreamfactory":{"source":"iana","extensions":["dfac"]},"application/vnd.drive+json":{"source":"iana","compressible":true},"application/vnd.ds-keypoint":{"source":"apache","extensions":["kpxx"]},"application/vnd.dtg.local":{"source":"iana"},"application/vnd.dtg.local.flash":{"source":"iana"},"application/vnd.dtg.local.html":{"source":"iana"},"application/vnd.dvb.ait":{"source":"iana","extensions":["ait"]},"application/vnd.dvb.dvbisl+xml":{"source":"iana","compressible":true},"application/vnd.dvb.dvbj":{"source":"iana"},"application/vnd.dvb.esgcontainer":{"source":"iana"},"application/vnd.dvb.ipdcdftnotifaccess":{"source":"iana"},"application/vnd.dvb.ipdcesgaccess":{"source":"iana"},"application/vnd.dvb.ipdcesgaccess2":{"source":"iana"},"application/vnd.dvb.ipdcesgpdd":{"source":"iana"},"application/vnd.dvb.ipdcroaming":{"source":"iana"},"application/vnd.dvb.iptv.alfec-base":{"source":"iana"},"application/vnd.dvb.iptv.alfec-enhancement":{"source":"iana"},"application/vnd.dvb.notif-aggregate-root+xml":{"source":"iana","compressible":true},"application/vnd.dvb.notif-container+xml":{"source":"iana","compressible":true},"application/vnd.dvb.notif-generic+xml":{"source":"iana","compressible":true},"application/vnd.dvb.notif-ia-msglist+xml":{"source":"iana","compressible":true},"application/vnd.dvb.notif-ia-registration-request+xml":{"source":"iana","compressible":true},"application/vnd.dvb.notif-ia-registration-response+xml":{"source":"iana","compressible":true},"application/vnd.dvb.notif-init+xml":{"source":"iana","compressible":true},"application/vnd.dvb.pfr":{"source":"iana"},"application/vnd.dvb.service":{"source":"iana","extensions":["svc"]},"application/vnd.dxr":{"source":"iana"},"application/vnd.dynageo":{"source":"iana","extensions":["geo"]},"application/vnd.dzr":{"source":"iana"},"application/vnd.easykaraoke.cdgdownload":{"source":"iana"},"application/vnd.ecdis-update":{"source":"iana"},"application/vnd.ecip.rlp":{"source":"iana"},"application/vnd.ecowin.chart":{"source":"iana","extensions":["mag"]},"application/vnd.ecowin.filerequest":{"source":"iana"},"application/vnd.ecowin.fileupdate":{"source":"iana"},"application/vnd.ecowin.series":{"source":"iana"},"application/vnd.ecowin.seriesrequest":{"source":"iana"},"application/vnd.ecowin.seriesupdate":{"source":"iana"},"application/vnd.efi.img":{"source":"iana"},"application/vnd.efi.iso":{"source":"iana"},"application/vnd.emclient.accessrequest+xml":{"source":"iana","compressible":true},"application/vnd.enliven":{"source":"iana","extensions":["nml"]},"application/vnd.enphase.envoy":{"source":"iana"},"application/vnd.eprints.data+xml":{"source":"iana","compressible":true},"application/vnd.epson.esf":{"source":"iana","extensions":["esf"]},"application/vnd.epson.msf":{"source":"iana","extensions":["msf"]},"application/vnd.epson.quickanime":{"source":"iana","extensions":["qam"]},"application/vnd.epson.salt":{"source":"iana","extensions":["slt"]},"application/vnd.epson.ssf":{"source":"iana","extensions":["ssf"]},"application/vnd.ericsson.quickcall":{"source":"iana"},"application/vnd.espass-espass+zip":{"source":"iana","compressible":false},"application/vnd.eszigno3+xml":{"source":"iana","compressible":true,"extensions":["es3","et3"]},"application/vnd.etsi.aoc+xml":{"source":"iana","compressible":true},"application/vnd.etsi.asic-e+zip":{"source":"iana","compressible":false},"application/vnd.etsi.asic-s+zip":{"source":"iana","compressible":false},"application/vnd.etsi.cug+xml":{"source":"iana","compressible":true},"application/vnd.etsi.iptvcommand+xml":{"source":"iana","compressible":true},"application/vnd.etsi.iptvdiscovery+xml":{"source":"iana","compressible":true},"application/vnd.etsi.iptvprofile+xml":{"source":"iana","compressible":true},"application/vnd.etsi.iptvsad-bc+xml":{"source":"iana","compressible":true},"application/vnd.etsi.iptvsad-cod+xml":{"source":"iana","compressible":true},"application/vnd.etsi.iptvsad-npvr+xml":{"source":"iana","compressible":true},"application/vnd.etsi.iptvservice+xml":{"source":"iana","compressible":true},"application/vnd.etsi.iptvsync+xml":{"source":"iana","compressible":true},"application/vnd.etsi.iptvueprofile+xml":{"source":"iana","compressible":true},"application/vnd.etsi.mcid+xml":{"source":"iana","compressible":true},"application/vnd.etsi.mheg5":{"source":"iana"},"application/vnd.etsi.overload-control-policy-dataset+xml":{"source":"iana","compressible":true},"application/vnd.etsi.pstn+xml":{"source":"iana","compressible":true},"application/vnd.etsi.sci+xml":{"source":"iana","compressible":true},"application/vnd.etsi.simservs+xml":{"source":"iana","compressible":true},"application/vnd.etsi.timestamp-token":{"source":"iana"},"application/vnd.etsi.tsl+xml":{"source":"iana","compressible":true},"application/vnd.etsi.tsl.der":{"source":"iana"},"application/vnd.eudora.data":{"source":"iana"},"application/vnd.evolv.ecig.profile":{"source":"iana"},"application/vnd.evolv.ecig.settings":{"source":"iana"},"application/vnd.evolv.ecig.theme":{"source":"iana"},"application/vnd.exstream-empower+zip":{"source":"iana","compressible":false},"application/vnd.exstream-package":{"source":"iana"},"application/vnd.ezpix-album":{"source":"iana","extensions":["ez2"]},"application/vnd.ezpix-package":{"source":"iana","extensions":["ez3"]},"application/vnd.f-secure.mobile":{"source":"iana"},"application/vnd.fastcopy-disk-image":{"source":"iana"},"application/vnd.fdf":{"source":"iana","extensions":["fdf"]},"application/vnd.fdsn.mseed":{"source":"iana","extensions":["mseed"]},"application/vnd.fdsn.seed":{"source":"iana","extensions":["seed","dataless"]},"application/vnd.ffsns":{"source":"iana"},"application/vnd.ficlab.flb+zip":{"source":"iana","compressible":false},"application/vnd.filmit.zfc":{"source":"iana"},"application/vnd.fints":{"source":"iana"},"application/vnd.firemonkeys.cloudcell":{"source":"iana"},"application/vnd.flographit":{"source":"iana","extensions":["gph"]},"application/vnd.fluxtime.clip":{"source":"iana","extensions":["ftc"]},"application/vnd.font-fontforge-sfd":{"source":"iana"},"application/vnd.framemaker":{"source":"iana","extensions":["fm","frame","maker","book"]},"application/vnd.frogans.fnc":{"source":"iana","extensions":["fnc"]},"application/vnd.frogans.ltf":{"source":"iana","extensions":["ltf"]},"application/vnd.fsc.weblaunch":{"source":"iana","extensions":["fsc"]},"application/vnd.fujifilm.fb.docuworks":{"source":"iana"},"application/vnd.fujifilm.fb.docuworks.binder":{"source":"iana"},"application/vnd.fujifilm.fb.docuworks.container":{"source":"iana"},"application/vnd.fujifilm.fb.jfi+xml":{"source":"iana","compressible":true},"application/vnd.fujitsu.oasys":{"source":"iana","extensions":["oas"]},"application/vnd.fujitsu.oasys2":{"source":"iana","extensions":["oa2"]},"application/vnd.fujitsu.oasys3":{"source":"iana","extensions":["oa3"]},"application/vnd.fujitsu.oasysgp":{"source":"iana","extensions":["fg5"]},"application/vnd.fujitsu.oasysprs":{"source":"iana","extensions":["bh2"]},"application/vnd.fujixerox.art-ex":{"source":"iana"},"application/vnd.fujixerox.art4":{"source":"iana"},"application/vnd.fujixerox.ddd":{"source":"iana","extensions":["ddd"]},"application/vnd.fujixerox.docuworks":{"source":"iana","extensions":["xdw"]},"application/vnd.fujixerox.docuworks.binder":{"source":"iana","extensions":["xbd"]},"application/vnd.fujixerox.docuworks.container":{"source":"iana"},"application/vnd.fujixerox.hbpl":{"source":"iana"},"application/vnd.fut-misnet":{"source":"iana"},"application/vnd.futoin+cbor":{"source":"iana"},"application/vnd.futoin+json":{"source":"iana","compressible":true},"application/vnd.fuzzysheet":{"source":"iana","extensions":["fzs"]},"application/vnd.genomatix.tuxedo":{"source":"iana","extensions":["txd"]},"application/vnd.gentics.grd+json":{"source":"iana","compressible":true},"application/vnd.geo+json":{"source":"iana","compressible":true},"application/vnd.geocube+xml":{"source":"iana","compressible":true},"application/vnd.geogebra.file":{"source":"iana","extensions":["ggb"]},"application/vnd.geogebra.slides":{"source":"iana"},"application/vnd.geogebra.tool":{"source":"iana","extensions":["ggt"]},"application/vnd.geometry-explorer":{"source":"iana","extensions":["gex","gre"]},"application/vnd.geonext":{"source":"iana","extensions":["gxt"]},"application/vnd.geoplan":{"source":"iana","extensions":["g2w"]},"application/vnd.geospace":{"source":"iana","extensions":["g3w"]},"application/vnd.gerber":{"source":"iana"},"application/vnd.globalplatform.card-content-mgt":{"source":"iana"},"application/vnd.globalplatform.card-content-mgt-response":{"source":"iana"},"application/vnd.gmx":{"source":"iana","extensions":["gmx"]},"application/vnd.google-apps.document":{"compressible":false,"extensions":["gdoc"]},"application/vnd.google-apps.presentation":{"compressible":false,"extensions":["gslides"]},"application/vnd.google-apps.spreadsheet":{"compressible":false,"extensions":["gsheet"]},"application/vnd.google-earth.kml+xml":{"source":"iana","compressible":true,"extensions":["kml"]},"application/vnd.google-earth.kmz":{"source":"iana","compressible":false,"extensions":["kmz"]},"application/vnd.gov.sk.e-form+xml":{"source":"iana","compressible":true},"application/vnd.gov.sk.e-form+zip":{"source":"iana","compressible":false},"application/vnd.gov.sk.xmldatacontainer+xml":{"source":"iana","compressible":true},"application/vnd.grafeq":{"source":"iana","extensions":["gqf","gqs"]},"application/vnd.gridmp":{"source":"iana"},"application/vnd.groove-account":{"source":"iana","extensions":["gac"]},"application/vnd.groove-help":{"source":"iana","extensions":["ghf"]},"application/vnd.groove-identity-message":{"source":"iana","extensions":["gim"]},"application/vnd.groove-injector":{"source":"iana","extensions":["grv"]},"application/vnd.groove-tool-message":{"source":"iana","extensions":["gtm"]},"application/vnd.groove-tool-template":{"source":"iana","extensions":["tpl"]},"application/vnd.groove-vcard":{"source":"iana","extensions":["vcg"]},"application/vnd.hal+json":{"source":"iana","compressible":true},"application/vnd.hal+xml":{"source":"iana","compressible":true,"extensions":["hal"]},"application/vnd.handheld-entertainment+xml":{"source":"iana","compressible":true,"extensions":["zmm"]},"application/vnd.hbci":{"source":"iana","extensions":["hbci"]},"application/vnd.hc+json":{"source":"iana","compressible":true},"application/vnd.hcl-bireports":{"source":"iana"},"application/vnd.hdt":{"source":"iana"},"application/vnd.heroku+json":{"source":"iana","compressible":true},"application/vnd.hhe.lesson-player":{"source":"iana","extensions":["les"]},"application/vnd.hp-hpgl":{"source":"iana","extensions":["hpgl"]},"application/vnd.hp-hpid":{"source":"iana","extensions":["hpid"]},"application/vnd.hp-hps":{"source":"iana","extensions":["hps"]},"application/vnd.hp-jlyt":{"source":"iana","extensions":["jlt"]},"application/vnd.hp-pcl":{"source":"iana","extensions":["pcl"]},"application/vnd.hp-pclxl":{"source":"iana","extensions":["pclxl"]},"application/vnd.httphone":{"source":"iana"},"application/vnd.hydrostatix.sof-data":{"source":"iana","extensions":["sfd-hdstx"]},"application/vnd.hyper+json":{"source":"iana","compressible":true},"application/vnd.hyper-item+json":{"source":"iana","compressible":true},"application/vnd.hyperdrive+json":{"source":"iana","compressible":true},"application/vnd.hzn-3d-crossword":{"source":"iana"},"application/vnd.ibm.afplinedata":{"source":"iana"},"application/vnd.ibm.electronic-media":{"source":"iana"},"application/vnd.ibm.minipay":{"source":"iana","extensions":["mpy"]},"application/vnd.ibm.modcap":{"source":"iana","extensions":["afp","listafp","list3820"]},"application/vnd.ibm.rights-management":{"source":"iana","extensions":["irm"]},"application/vnd.ibm.secure-container":{"source":"iana","extensions":["sc"]},"application/vnd.iccprofile":{"source":"iana","extensions":["icc","icm"]},"application/vnd.ieee.1905":{"source":"iana"},"application/vnd.igloader":{"source":"iana","extensions":["igl"]},"application/vnd.imagemeter.folder+zip":{"source":"iana","compressible":false},"application/vnd.imagemeter.image+zip":{"source":"iana","compressible":false},"application/vnd.immervision-ivp":{"source":"iana","extensions":["ivp"]},"application/vnd.immervision-ivu":{"source":"iana","extensions":["ivu"]},"application/vnd.ims.imsccv1p1":{"source":"iana"},"application/vnd.ims.imsccv1p2":{"source":"iana"},"application/vnd.ims.imsccv1p3":{"source":"iana"},"application/vnd.ims.lis.v2.result+json":{"source":"iana","compressible":true},"application/vnd.ims.lti.v2.toolconsumerprofile+json":{"source":"iana","compressible":true},"application/vnd.ims.lti.v2.toolproxy+json":{"source":"iana","compressible":true},"application/vnd.ims.lti.v2.toolproxy.id+json":{"source":"iana","compressible":true},"application/vnd.ims.lti.v2.toolsettings+json":{"source":"iana","compressible":true},"application/vnd.ims.lti.v2.toolsettings.simple+json":{"source":"iana","compressible":true},"application/vnd.informedcontrol.rms+xml":{"source":"iana","compressible":true},"application/vnd.informix-visionary":{"source":"iana"},"application/vnd.infotech.project":{"source":"iana"},"application/vnd.infotech.project+xml":{"source":"iana","compressible":true},"application/vnd.innopath.wamp.notification":{"source":"iana"},"application/vnd.insors.igm":{"source":"iana","extensions":["igm"]},"application/vnd.intercon.formnet":{"source":"iana","extensions":["xpw","xpx"]},"application/vnd.intergeo":{"source":"iana","extensions":["i2g"]},"application/vnd.intertrust.digibox":{"source":"iana"},"application/vnd.intertrust.nncp":{"source":"iana"},"application/vnd.intu.qbo":{"source":"iana","extensions":["qbo"]},"application/vnd.intu.qfx":{"source":"iana","extensions":["qfx"]},"application/vnd.iptc.g2.catalogitem+xml":{"source":"iana","compressible":true},"application/vnd.iptc.g2.conceptitem+xml":{"source":"iana","compressible":true},"application/vnd.iptc.g2.knowledgeitem+xml":{"source":"iana","compressible":true},"application/vnd.iptc.g2.newsitem+xml":{"source":"iana","compressible":true},"application/vnd.iptc.g2.newsmessage+xml":{"source":"iana","compressible":true},"application/vnd.iptc.g2.packageitem+xml":{"source":"iana","compressible":true},"application/vnd.iptc.g2.planningitem+xml":{"source":"iana","compressible":true},"application/vnd.ipunplugged.rcprofile":{"source":"iana","extensions":["rcprofile"]},"application/vnd.irepository.package+xml":{"source":"iana","compressible":true,"extensions":["irp"]},"application/vnd.is-xpr":{"source":"iana","extensions":["xpr"]},"application/vnd.isac.fcs":{"source":"iana","extensions":["fcs"]},"application/vnd.iso11783-10+zip":{"source":"iana","compressible":false},"application/vnd.jam":{"source":"iana","extensions":["jam"]},"application/vnd.japannet-directory-service":{"source":"iana"},"application/vnd.japannet-jpnstore-wakeup":{"source":"iana"},"application/vnd.japannet-payment-wakeup":{"source":"iana"},"application/vnd.japannet-registration":{"source":"iana"},"application/vnd.japannet-registration-wakeup":{"source":"iana"},"application/vnd.japannet-setstore-wakeup":{"source":"iana"},"application/vnd.japannet-verification":{"source":"iana"},"application/vnd.japannet-verification-wakeup":{"source":"iana"},"application/vnd.jcp.javame.midlet-rms":{"source":"iana","extensions":["rms"]},"application/vnd.jisp":{"source":"iana","extensions":["jisp"]},"application/vnd.joost.joda-archive":{"source":"iana","extensions":["joda"]},"application/vnd.jsk.isdn-ngn":{"source":"iana"},"application/vnd.kahootz":{"source":"iana","extensions":["ktz","ktr"]},"application/vnd.kde.karbon":{"source":"iana","extensions":["karbon"]},"application/vnd.kde.kchart":{"source":"iana","extensions":["chrt"]},"application/vnd.kde.kformula":{"source":"iana","extensions":["kfo"]},"application/vnd.kde.kivio":{"source":"iana","extensions":["flw"]},"application/vnd.kde.kontour":{"source":"iana","extensions":["kon"]},"application/vnd.kde.kpresenter":{"source":"iana","extensions":["kpr","kpt"]},"application/vnd.kde.kspread":{"source":"iana","extensions":["ksp"]},"application/vnd.kde.kword":{"source":"iana","extensions":["kwd","kwt"]},"application/vnd.kenameaapp":{"source":"iana","extensions":["htke"]},"application/vnd.kidspiration":{"source":"iana","extensions":["kia"]},"application/vnd.kinar":{"source":"iana","extensions":["kne","knp"]},"application/vnd.koan":{"source":"iana","extensions":["skp","skd","skt","skm"]},"application/vnd.kodak-descriptor":{"source":"iana","extensions":["sse"]},"application/vnd.las":{"source":"iana"},"application/vnd.las.las+json":{"source":"iana","compressible":true},"application/vnd.las.las+xml":{"source":"iana","compressible":true,"extensions":["lasxml"]},"application/vnd.laszip":{"source":"iana"},"application/vnd.leap+json":{"source":"iana","compressible":true},"application/vnd.liberty-request+xml":{"source":"iana","compressible":true},"application/vnd.llamagraphics.life-balance.desktop":{"source":"iana","extensions":["lbd"]},"application/vnd.llamagraphics.life-balance.exchange+xml":{"source":"iana","compressible":true,"extensions":["lbe"]},"application/vnd.logipipe.circuit+zip":{"source":"iana","compressible":false},"application/vnd.loom":{"source":"iana"},"application/vnd.lotus-1-2-3":{"source":"iana","extensions":["123"]},"application/vnd.lotus-approach":{"source":"iana","extensions":["apr"]},"application/vnd.lotus-freelance":{"source":"iana","extensions":["pre"]},"application/vnd.lotus-notes":{"source":"iana","extensions":["nsf"]},"application/vnd.lotus-organizer":{"source":"iana","extensions":["org"]},"application/vnd.lotus-screencam":{"source":"iana","extensions":["scm"]},"application/vnd.lotus-wordpro":{"source":"iana","extensions":["lwp"]},"application/vnd.macports.portpkg":{"source":"iana","extensions":["portpkg"]},"application/vnd.mapbox-vector-tile":{"source":"iana","extensions":["mvt"]},"application/vnd.marlin.drm.actiontoken+xml":{"source":"iana","compressible":true},"application/vnd.marlin.drm.conftoken+xml":{"source":"iana","compressible":true},"application/vnd.marlin.drm.license+xml":{"source":"iana","compressible":true},"application/vnd.marlin.drm.mdcf":{"source":"iana"},"application/vnd.mason+json":{"source":"iana","compressible":true},"application/vnd.maxmind.maxmind-db":{"source":"iana"},"application/vnd.mcd":{"source":"iana","extensions":["mcd"]},"application/vnd.medcalcdata":{"source":"iana","extensions":["mc1"]},"application/vnd.mediastation.cdkey":{"source":"iana","extensions":["cdkey"]},"application/vnd.meridian-slingshot":{"source":"iana"},"application/vnd.mfer":{"source":"iana","extensions":["mwf"]},"application/vnd.mfmp":{"source":"iana","extensions":["mfm"]},"application/vnd.micro+json":{"source":"iana","compressible":true},"application/vnd.micrografx.flo":{"source":"iana","extensions":["flo"]},"application/vnd.micrografx.igx":{"source":"iana","extensions":["igx"]},"application/vnd.microsoft.portable-executable":{"source":"iana"},"application/vnd.microsoft.windows.thumbnail-cache":{"source":"iana"},"application/vnd.miele+json":{"source":"iana","compressible":true},"application/vnd.mif":{"source":"iana","extensions":["mif"]},"application/vnd.minisoft-hp3000-save":{"source":"iana"},"application/vnd.mitsubishi.misty-guard.trustweb":{"source":"iana"},"application/vnd.mobius.daf":{"source":"iana","extensions":["daf"]},"application/vnd.mobius.dis":{"source":"iana","extensions":["dis"]},"application/vnd.mobius.mbk":{"source":"iana","extensions":["mbk"]},"application/vnd.mobius.mqy":{"source":"iana","extensions":["mqy"]},"application/vnd.mobius.msl":{"source":"iana","extensions":["msl"]},"application/vnd.mobius.plc":{"source":"iana","extensions":["plc"]},"application/vnd.mobius.txf":{"source":"iana","extensions":["txf"]},"application/vnd.mophun.application":{"source":"iana","extensions":["mpn"]},"application/vnd.mophun.certificate":{"source":"iana","extensions":["mpc"]},"application/vnd.motorola.flexsuite":{"source":"iana"},"application/vnd.motorola.flexsuite.adsi":{"source":"iana"},"application/vnd.motorola.flexsuite.fis":{"source":"iana"},"application/vnd.motorola.flexsuite.gotap":{"source":"iana"},"application/vnd.motorola.flexsuite.kmr":{"source":"iana"},"application/vnd.motorola.flexsuite.ttc":{"source":"iana"},"application/vnd.motorola.flexsuite.wem":{"source":"iana"},"application/vnd.motorola.iprm":{"source":"iana"},"application/vnd.mozilla.xul+xml":{"source":"iana","compressible":true,"extensions":["xul"]},"application/vnd.ms-3mfdocument":{"source":"iana"},"application/vnd.ms-artgalry":{"source":"iana","extensions":["cil"]},"application/vnd.ms-asf":{"source":"iana"},"application/vnd.ms-cab-compressed":{"source":"iana","extensions":["cab"]},"application/vnd.ms-color.iccprofile":{"source":"apache"},"application/vnd.ms-excel":{"source":"iana","compressible":false,"extensions":["xls","xlm","xla","xlc","xlt","xlw"]},"application/vnd.ms-excel.addin.macroenabled.12":{"source":"iana","extensions":["xlam"]},"application/vnd.ms-excel.sheet.binary.macroenabled.12":{"source":"iana","extensions":["xlsb"]},"application/vnd.ms-excel.sheet.macroenabled.12":{"source":"iana","extensions":["xlsm"]},"application/vnd.ms-excel.template.macroenabled.12":{"source":"iana","extensions":["xltm"]},"application/vnd.ms-fontobject":{"source":"iana","compressible":true,"extensions":["eot"]},"application/vnd.ms-htmlhelp":{"source":"iana","extensions":["chm"]},"application/vnd.ms-ims":{"source":"iana","extensions":["ims"]},"application/vnd.ms-lrm":{"source":"iana","extensions":["lrm"]},"application/vnd.ms-office.activex+xml":{"source":"iana","compressible":true},"application/vnd.ms-officetheme":{"source":"iana","extensions":["thmx"]},"application/vnd.ms-opentype":{"source":"apache","compressible":true},"application/vnd.ms-outlook":{"compressible":false,"extensions":["msg"]},"application/vnd.ms-package.obfuscated-opentype":{"source":"apache"},"application/vnd.ms-pki.seccat":{"source":"apache","extensions":["cat"]},"application/vnd.ms-pki.stl":{"source":"apache","extensions":["stl"]},"application/vnd.ms-playready.initiator+xml":{"source":"iana","compressible":true},"application/vnd.ms-powerpoint":{"source":"iana","compressible":false,"extensions":["ppt","pps","pot"]},"application/vnd.ms-powerpoint.addin.macroenabled.12":{"source":"iana","extensions":["ppam"]},"application/vnd.ms-powerpoint.presentation.macroenabled.12":{"source":"iana","extensions":["pptm"]},"application/vnd.ms-powerpoint.slide.macroenabled.12":{"source":"iana","extensions":["sldm"]},"application/vnd.ms-powerpoint.slideshow.macroenabled.12":{"source":"iana","extensions":["ppsm"]},"application/vnd.ms-powerpoint.template.macroenabled.12":{"source":"iana","extensions":["potm"]},"application/vnd.ms-printdevicecapabilities+xml":{"source":"iana","compressible":true},"application/vnd.ms-printing.printticket+xml":{"source":"apache","compressible":true},"application/vnd.ms-printschematicket+xml":{"source":"iana","compressible":true},"application/vnd.ms-project":{"source":"iana","extensions":["mpp","mpt"]},"application/vnd.ms-tnef":{"source":"iana"},"application/vnd.ms-windows.devicepairing":{"source":"iana"},"application/vnd.ms-windows.nwprinting.oob":{"source":"iana"},"application/vnd.ms-windows.printerpairing":{"source":"iana"},"application/vnd.ms-windows.wsd.oob":{"source":"iana"},"application/vnd.ms-wmdrm.lic-chlg-req":{"source":"iana"},"application/vnd.ms-wmdrm.lic-resp":{"source":"iana"},"application/vnd.ms-wmdrm.meter-chlg-req":{"source":"iana"},"application/vnd.ms-wmdrm.meter-resp":{"source":"iana"},"application/vnd.ms-word.document.macroenabled.12":{"source":"iana","extensions":["docm"]},"application/vnd.ms-word.template.macroenabled.12":{"source":"iana","extensions":["dotm"]},"application/vnd.ms-works":{"source":"iana","extensions":["wps","wks","wcm","wdb"]},"application/vnd.ms-wpl":{"source":"iana","extensions":["wpl"]},"application/vnd.ms-xpsdocument":{"source":"iana","compressible":false,"extensions":["xps"]},"application/vnd.msa-disk-image":{"source":"iana"},"application/vnd.mseq":{"source":"iana","extensions":["mseq"]},"application/vnd.msign":{"source":"iana"},"application/vnd.multiad.creator":{"source":"iana"},"application/vnd.multiad.creator.cif":{"source":"iana"},"application/vnd.music-niff":{"source":"iana"},"application/vnd.musician":{"source":"iana","extensions":["mus"]},"application/vnd.muvee.style":{"source":"iana","extensions":["msty"]},"application/vnd.mynfc":{"source":"iana","extensions":["taglet"]},"application/vnd.ncd.control":{"source":"iana"},"application/vnd.ncd.reference":{"source":"iana"},"application/vnd.nearst.inv+json":{"source":"iana","compressible":true},"application/vnd.nebumind.line":{"source":"iana"},"application/vnd.nervana":{"source":"iana"},"application/vnd.netfpx":{"source":"iana"},"application/vnd.neurolanguage.nlu":{"source":"iana","extensions":["nlu"]},"application/vnd.nimn":{"source":"iana"},"application/vnd.nintendo.nitro.rom":{"source":"iana"},"application/vnd.nintendo.snes.rom":{"source":"iana"},"application/vnd.nitf":{"source":"iana","extensions":["ntf","nitf"]},"application/vnd.noblenet-directory":{"source":"iana","extensions":["nnd"]},"application/vnd.noblenet-sealer":{"source":"iana","extensions":["nns"]},"application/vnd.noblenet-web":{"source":"iana","extensions":["nnw"]},"application/vnd.nokia.catalogs":{"source":"iana"},"application/vnd.nokia.conml+wbxml":{"source":"iana"},"application/vnd.nokia.conml+xml":{"source":"iana","compressible":true},"application/vnd.nokia.iptv.config+xml":{"source":"iana","compressible":true},"application/vnd.nokia.isds-radio-presets":{"source":"iana"},"application/vnd.nokia.landmark+wbxml":{"source":"iana"},"application/vnd.nokia.landmark+xml":{"source":"iana","compressible":true},"application/vnd.nokia.landmarkcollection+xml":{"source":"iana","compressible":true},"application/vnd.nokia.n-gage.ac+xml":{"source":"iana","compressible":true,"extensions":["ac"]},"application/vnd.nokia.n-gage.data":{"source":"iana","extensions":["ngdat"]},"application/vnd.nokia.n-gage.symbian.install":{"source":"iana","extensions":["n-gage"]},"application/vnd.nokia.ncd":{"source":"iana"},"application/vnd.nokia.pcd+wbxml":{"source":"iana"},"application/vnd.nokia.pcd+xml":{"source":"iana","compressible":true},"application/vnd.nokia.radio-preset":{"source":"iana","extensions":["rpst"]},"application/vnd.nokia.radio-presets":{"source":"iana","extensions":["rpss"]},"application/vnd.novadigm.edm":{"source":"iana","extensions":["edm"]},"application/vnd.novadigm.edx":{"source":"iana","extensions":["edx"]},"application/vnd.novadigm.ext":{"source":"iana","extensions":["ext"]},"application/vnd.ntt-local.content-share":{"source":"iana"},"application/vnd.ntt-local.file-transfer":{"source":"iana"},"application/vnd.ntt-local.ogw_remote-access":{"source":"iana"},"application/vnd.ntt-local.sip-ta_remote":{"source":"iana"},"application/vnd.ntt-local.sip-ta_tcp_stream":{"source":"iana"},"application/vnd.oasis.opendocument.chart":{"source":"iana","extensions":["odc"]},"application/vnd.oasis.opendocument.chart-template":{"source":"iana","extensions":["otc"]},"application/vnd.oasis.opendocument.database":{"source":"iana","extensions":["odb"]},"application/vnd.oasis.opendocument.formula":{"source":"iana","extensions":["odf"]},"application/vnd.oasis.opendocument.formula-template":{"source":"iana","extensions":["odft"]},"application/vnd.oasis.opendocument.graphics":{"source":"iana","compressible":false,"extensions":["odg"]},"application/vnd.oasis.opendocument.graphics-template":{"source":"iana","extensions":["otg"]},"application/vnd.oasis.opendocument.image":{"source":"iana","extensions":["odi"]},"application/vnd.oasis.opendocument.image-template":{"source":"iana","extensions":["oti"]},"application/vnd.oasis.opendocument.presentation":{"source":"iana","compressible":false,"extensions":["odp"]},"application/vnd.oasis.opendocument.presentation-template":{"source":"iana","extensions":["otp"]},"application/vnd.oasis.opendocument.spreadsheet":{"source":"iana","compressible":false,"extensions":["ods"]},"application/vnd.oasis.opendocument.spreadsheet-template":{"source":"iana","extensions":["ots"]},"application/vnd.oasis.opendocument.text":{"source":"iana","compressible":false,"extensions":["odt"]},"application/vnd.oasis.opendocument.text-master":{"source":"iana","extensions":["odm"]},"application/vnd.oasis.opendocument.text-template":{"source":"iana","extensions":["ott"]},"application/vnd.oasis.opendocument.text-web":{"source":"iana","extensions":["oth"]},"application/vnd.obn":{"source":"iana"},"application/vnd.ocf+cbor":{"source":"iana"},"application/vnd.oci.image.manifest.v1+json":{"source":"iana","compressible":true},"application/vnd.oftn.l10n+json":{"source":"iana","compressible":true},"application/vnd.oipf.contentaccessdownload+xml":{"source":"iana","compressible":true},"application/vnd.oipf.contentaccessstreaming+xml":{"source":"iana","compressible":true},"application/vnd.oipf.cspg-hexbinary":{"source":"iana"},"application/vnd.oipf.dae.svg+xml":{"source":"iana","compressible":true},"application/vnd.oipf.dae.xhtml+xml":{"source":"iana","compressible":true},"application/vnd.oipf.mippvcontrolmessage+xml":{"source":"iana","compressible":true},"application/vnd.oipf.pae.gem":{"source":"iana"},"application/vnd.oipf.spdiscovery+xml":{"source":"iana","compressible":true},"application/vnd.oipf.spdlist+xml":{"source":"iana","compressible":true},"application/vnd.oipf.ueprofile+xml":{"source":"iana","compressible":true},"application/vnd.oipf.userprofile+xml":{"source":"iana","compressible":true},"application/vnd.olpc-sugar":{"source":"iana","extensions":["xo"]},"application/vnd.oma-scws-config":{"source":"iana"},"application/vnd.oma-scws-http-request":{"source":"iana"},"application/vnd.oma-scws-http-response":{"source":"iana"},"application/vnd.oma.bcast.associated-procedure-parameter+xml":{"source":"iana","compressible":true},"application/vnd.oma.bcast.drm-trigger+xml":{"source":"iana","compressible":true},"application/vnd.oma.bcast.imd+xml":{"source":"iana","compressible":true},"application/vnd.oma.bcast.ltkm":{"source":"iana"},"application/vnd.oma.bcast.notification+xml":{"source":"iana","compressible":true},"application/vnd.oma.bcast.provisioningtrigger":{"source":"iana"},"application/vnd.oma.bcast.sgboot":{"source":"iana"},"application/vnd.oma.bcast.sgdd+xml":{"source":"iana","compressible":true},"application/vnd.oma.bcast.sgdu":{"source":"iana"},"application/vnd.oma.bcast.simple-symbol-container":{"source":"iana"},"application/vnd.oma.bcast.smartcard-trigger+xml":{"source":"iana","compressible":true},"application/vnd.oma.bcast.sprov+xml":{"source":"iana","compressible":true},"application/vnd.oma.bcast.stkm":{"source":"iana"},"application/vnd.oma.cab-address-book+xml":{"source":"iana","compressible":true},"application/vnd.oma.cab-feature-handler+xml":{"source":"iana","compressible":true},"application/vnd.oma.cab-pcc+xml":{"source":"iana","compressible":true},"application/vnd.oma.cab-subs-invite+xml":{"source":"iana","compressible":true},"application/vnd.oma.cab-user-prefs+xml":{"source":"iana","compressible":true},"application/vnd.oma.dcd":{"source":"iana"},"application/vnd.oma.dcdc":{"source":"iana"},"application/vnd.oma.dd2+xml":{"source":"iana","compressible":true,"extensions":["dd2"]},"application/vnd.oma.drm.risd+xml":{"source":"iana","compressible":true},"application/vnd.oma.group-usage-list+xml":{"source":"iana","compressible":true},"application/vnd.oma.lwm2m+cbor":{"source":"iana"},"application/vnd.oma.lwm2m+json":{"source":"iana","compressible":true},"application/vnd.oma.lwm2m+tlv":{"source":"iana"},"application/vnd.oma.pal+xml":{"source":"iana","compressible":true},"application/vnd.oma.poc.detailed-progress-report+xml":{"source":"iana","compressible":true},"application/vnd.oma.poc.final-report+xml":{"source":"iana","compressible":true},"application/vnd.oma.poc.groups+xml":{"source":"iana","compressible":true},"application/vnd.oma.poc.invocation-descriptor+xml":{"source":"iana","compressible":true},"application/vnd.oma.poc.optimized-progress-report+xml":{"source":"iana","compressible":true},"application/vnd.oma.push":{"source":"iana"},"application/vnd.oma.scidm.messages+xml":{"source":"iana","compressible":true},"application/vnd.oma.xcap-directory+xml":{"source":"iana","compressible":true},"application/vnd.omads-email+xml":{"source":"iana","charset":"UTF-8","compressible":true},"application/vnd.omads-file+xml":{"source":"iana","charset":"UTF-8","compressible":true},"application/vnd.omads-folder+xml":{"source":"iana","charset":"UTF-8","compressible":true},"application/vnd.omaloc-supl-init":{"source":"iana"},"application/vnd.onepager":{"source":"iana"},"application/vnd.onepagertamp":{"source":"iana"},"application/vnd.onepagertamx":{"source":"iana"},"application/vnd.onepagertat":{"source":"iana"},"application/vnd.onepagertatp":{"source":"iana"},"application/vnd.onepagertatx":{"source":"iana"},"application/vnd.openblox.game+xml":{"source":"iana","compressible":true,"extensions":["obgx"]},"application/vnd.openblox.game-binary":{"source":"iana"},"application/vnd.openeye.oeb":{"source":"iana"},"application/vnd.openofficeorg.extension":{"source":"apache","extensions":["oxt"]},"application/vnd.openstreetmap.data+xml":{"source":"iana","compressible":true,"extensions":["osm"]},"application/vnd.opentimestamps.ots":{"source":"iana"},"application/vnd.openxmlformats-officedocument.custom-properties+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.customxmlproperties+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.drawing+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.drawingml.chart+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.drawingml.chartshapes+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.drawingml.diagramcolors+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.drawingml.diagramdata+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.drawingml.diagramlayout+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.drawingml.diagramstyle+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.extended-properties+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.presentationml.commentauthors+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.presentationml.comments+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.presentationml.handoutmaster+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.presentationml.notesmaster+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.presentationml.notesslide+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.presentationml.presentation":{"source":"iana","compressible":false,"extensions":["pptx"]},"application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.presentationml.presprops+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.presentationml.slide":{"source":"iana","extensions":["sldx"]},"application/vnd.openxmlformats-officedocument.presentationml.slide+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.presentationml.slidelayout+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.presentationml.slidemaster+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.presentationml.slideshow":{"source":"iana","extensions":["ppsx"]},"application/vnd.openxmlformats-officedocument.presentationml.slideshow.main+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.presentationml.slideupdateinfo+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.presentationml.tablestyles+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.presentationml.tags+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.presentationml.template":{"source":"iana","extensions":["potx"]},"application/vnd.openxmlformats-officedocument.presentationml.template.main+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.presentationml.viewprops+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.spreadsheetml.calcchain+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.spreadsheetml.chartsheet+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.spreadsheetml.comments+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.spreadsheetml.connections+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.spreadsheetml.dialogsheet+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.spreadsheetml.externallink+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.spreadsheetml.pivotcachedefinition+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.spreadsheetml.pivotcacherecords+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.spreadsheetml.pivottable+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.spreadsheetml.querytable+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.spreadsheetml.revisionheaders+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.spreadsheetml.revisionlog+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.spreadsheetml.sharedstrings+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":{"source":"iana","compressible":false,"extensions":["xlsx"]},"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.spreadsheetml.sheetmetadata+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.spreadsheetml.table+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.spreadsheetml.tablesinglecells+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.spreadsheetml.template":{"source":"iana","extensions":["xltx"]},"application/vnd.openxmlformats-officedocument.spreadsheetml.template.main+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.spreadsheetml.usernames+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.spreadsheetml.volatiledependencies+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.theme+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.themeoverride+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.vmldrawing":{"source":"iana"},"application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.wordprocessingml.document":{"source":"iana","compressible":false,"extensions":["docx"]},"application/vnd.openxmlformats-officedocument.wordprocessingml.document.glossary+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.wordprocessingml.endnotes+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.wordprocessingml.fonttable+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.wordprocessingml.template":{"source":"iana","extensions":["dotx"]},"application/vnd.openxmlformats-officedocument.wordprocessingml.template.main+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-officedocument.wordprocessingml.websettings+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-package.core-properties+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-package.digital-signature-xmlsignature+xml":{"source":"iana","compressible":true},"application/vnd.openxmlformats-package.relationships+xml":{"source":"iana","compressible":true},"application/vnd.oracle.resource+json":{"source":"iana","compressible":true},"application/vnd.orange.indata":{"source":"iana"},"application/vnd.osa.netdeploy":{"source":"iana"},"application/vnd.osgeo.mapguide.package":{"source":"iana","extensions":["mgp"]},"application/vnd.osgi.bundle":{"source":"iana"},"application/vnd.osgi.dp":{"source":"iana","extensions":["dp"]},"application/vnd.osgi.subsystem":{"source":"iana","extensions":["esa"]},"application/vnd.otps.ct-kip+xml":{"source":"iana","compressible":true},"application/vnd.oxli.countgraph":{"source":"iana"},"application/vnd.pagerduty+json":{"source":"iana","compressible":true},"application/vnd.palm":{"source":"iana","extensions":["pdb","pqa","oprc"]},"application/vnd.panoply":{"source":"iana"},"application/vnd.paos.xml":{"source":"iana"},"application/vnd.patentdive":{"source":"iana"},"application/vnd.patientecommsdoc":{"source":"iana"},"application/vnd.pawaafile":{"source":"iana","extensions":["paw"]},"application/vnd.pcos":{"source":"iana"},"application/vnd.pg.format":{"source":"iana","extensions":["str"]},"application/vnd.pg.osasli":{"source":"iana","extensions":["ei6"]},"application/vnd.piaccess.application-licence":{"source":"iana"},"application/vnd.picsel":{"source":"iana","extensions":["efif"]},"application/vnd.pmi.widget":{"source":"iana","extensions":["wg"]},"application/vnd.poc.group-advertisement+xml":{"source":"iana","compressible":true},"application/vnd.pocketlearn":{"source":"iana","extensions":["plf"]},"application/vnd.powerbuilder6":{"source":"iana","extensions":["pbd"]},"application/vnd.powerbuilder6-s":{"source":"iana"},"application/vnd.powerbuilder7":{"source":"iana"},"application/vnd.powerbuilder7-s":{"source":"iana"},"application/vnd.powerbuilder75":{"source":"iana"},"application/vnd.powerbuilder75-s":{"source":"iana"},"application/vnd.preminet":{"source":"iana"},"application/vnd.previewsystems.box":{"source":"iana","extensions":["box"]},"application/vnd.proteus.magazine":{"source":"iana","extensions":["mgz"]},"application/vnd.psfs":{"source":"iana"},"application/vnd.publishare-delta-tree":{"source":"iana","extensions":["qps"]},"application/vnd.pvi.ptid1":{"source":"iana","extensions":["ptid"]},"application/vnd.pwg-multiplexed":{"source":"iana"},"application/vnd.pwg-xhtml-print+xml":{"source":"iana","compressible":true},"application/vnd.qualcomm.brew-app-res":{"source":"iana"},"application/vnd.quarantainenet":{"source":"iana"},"application/vnd.quark.quarkxpress":{"source":"iana","extensions":["qxd","qxt","qwd","qwt","qxl","qxb"]},"application/vnd.quobject-quoxdocument":{"source":"iana"},"application/vnd.radisys.moml+xml":{"source":"iana","compressible":true},"application/vnd.radisys.msml+xml":{"source":"iana","compressible":true},"application/vnd.radisys.msml-audit+xml":{"source":"iana","compressible":true},"application/vnd.radisys.msml-audit-conf+xml":{"source":"iana","compressible":true},"application/vnd.radisys.msml-audit-conn+xml":{"source":"iana","compressible":true},"application/vnd.radisys.msml-audit-dialog+xml":{"source":"iana","compressible":true},"application/vnd.radisys.msml-audit-stream+xml":{"source":"iana","compressible":true},"application/vnd.radisys.msml-conf+xml":{"source":"iana","compressible":true},"application/vnd.radisys.msml-dialog+xml":{"source":"iana","compressible":true},"application/vnd.radisys.msml-dialog-base+xml":{"source":"iana","compressible":true},"application/vnd.radisys.msml-dialog-fax-detect+xml":{"source":"iana","compressible":true},"application/vnd.radisys.msml-dialog-fax-sendrecv+xml":{"source":"iana","compressible":true},"application/vnd.radisys.msml-dialog-group+xml":{"source":"iana","compressible":true},"application/vnd.radisys.msml-dialog-speech+xml":{"source":"iana","compressible":true},"application/vnd.radisys.msml-dialog-transform+xml":{"source":"iana","compressible":true},"application/vnd.rainstor.data":{"source":"iana"},"application/vnd.rapid":{"source":"iana"},"application/vnd.rar":{"source":"iana","extensions":["rar"]},"application/vnd.realvnc.bed":{"source":"iana","extensions":["bed"]},"application/vnd.recordare.musicxml":{"source":"iana","extensions":["mxl"]},"application/vnd.recordare.musicxml+xml":{"source":"iana","compressible":true,"extensions":["musicxml"]},"application/vnd.renlearn.rlprint":{"source":"iana"},"application/vnd.resilient.logic":{"source":"iana"},"application/vnd.restful+json":{"source":"iana","compressible":true},"application/vnd.rig.cryptonote":{"source":"iana","extensions":["cryptonote"]},"application/vnd.rim.cod":{"source":"apache","extensions":["cod"]},"application/vnd.rn-realmedia":{"source":"apache","extensions":["rm"]},"application/vnd.rn-realmedia-vbr":{"source":"apache","extensions":["rmvb"]},"application/vnd.route66.link66+xml":{"source":"iana","compressible":true,"extensions":["link66"]},"application/vnd.rs-274x":{"source":"iana"},"application/vnd.ruckus.download":{"source":"iana"},"application/vnd.s3sms":{"source":"iana"},"application/vnd.sailingtracker.track":{"source":"iana","extensions":["st"]},"application/vnd.sar":{"source":"iana"},"application/vnd.sbm.cid":{"source":"iana"},"application/vnd.sbm.mid2":{"source":"iana"},"application/vnd.scribus":{"source":"iana"},"application/vnd.sealed.3df":{"source":"iana"},"application/vnd.sealed.csf":{"source":"iana"},"application/vnd.sealed.doc":{"source":"iana"},"application/vnd.sealed.eml":{"source":"iana"},"application/vnd.sealed.mht":{"source":"iana"},"application/vnd.sealed.net":{"source":"iana"},"application/vnd.sealed.ppt":{"source":"iana"},"application/vnd.sealed.tiff":{"source":"iana"},"application/vnd.sealed.xls":{"source":"iana"},"application/vnd.sealedmedia.softseal.html":{"source":"iana"},"application/vnd.sealedmedia.softseal.pdf":{"source":"iana"},"application/vnd.seemail":{"source":"iana","extensions":["see"]},"application/vnd.seis+json":{"source":"iana","compressible":true},"application/vnd.sema":{"source":"iana","extensions":["sema"]},"application/vnd.semd":{"source":"iana","extensions":["semd"]},"application/vnd.semf":{"source":"iana","extensions":["semf"]},"application/vnd.shade-save-file":{"source":"iana"},"application/vnd.shana.informed.formdata":{"source":"iana","extensions":["ifm"]},"application/vnd.shana.informed.formtemplate":{"source":"iana","extensions":["itp"]},"application/vnd.shana.informed.interchange":{"source":"iana","extensions":["iif"]},"application/vnd.shana.informed.package":{"source":"iana","extensions":["ipk"]},"application/vnd.shootproof+json":{"source":"iana","compressible":true},"application/vnd.shopkick+json":{"source":"iana","compressible":true},"application/vnd.shp":{"source":"iana"},"application/vnd.shx":{"source":"iana"},"application/vnd.sigrok.session":{"source":"iana"},"application/vnd.simtech-mindmapper":{"source":"iana","extensions":["twd","twds"]},"application/vnd.siren+json":{"source":"iana","compressible":true},"application/vnd.smaf":{"source":"iana","extensions":["mmf"]},"application/vnd.smart.notebook":{"source":"iana"},"application/vnd.smart.teacher":{"source":"iana","extensions":["teacher"]},"application/vnd.snesdev-page-table":{"source":"iana"},"application/vnd.software602.filler.form+xml":{"source":"iana","compressible":true,"extensions":["fo"]},"application/vnd.software602.filler.form-xml-zip":{"source":"iana"},"application/vnd.solent.sdkm+xml":{"source":"iana","compressible":true,"extensions":["sdkm","sdkd"]},"application/vnd.spotfire.dxp":{"source":"iana","extensions":["dxp"]},"application/vnd.spotfire.sfs":{"source":"iana","extensions":["sfs"]},"application/vnd.sqlite3":{"source":"iana"},"application/vnd.sss-cod":{"source":"iana"},"application/vnd.sss-dtf":{"source":"iana"},"application/vnd.sss-ntf":{"source":"iana"},"application/vnd.stardivision.calc":{"source":"apache","extensions":["sdc"]},"application/vnd.stardivision.draw":{"source":"apache","extensions":["sda"]},"application/vnd.stardivision.impress":{"source":"apache","extensions":["sdd"]},"application/vnd.stardivision.math":{"source":"apache","extensions":["smf"]},"application/vnd.stardivision.writer":{"source":"apache","extensions":["sdw","vor"]},"application/vnd.stardivision.writer-global":{"source":"apache","extensions":["sgl"]},"application/vnd.stepmania.package":{"source":"iana","extensions":["smzip"]},"application/vnd.stepmania.stepchart":{"source":"iana","extensions":["sm"]},"application/vnd.street-stream":{"source":"iana"},"application/vnd.sun.wadl+xml":{"source":"iana","compressible":true,"extensions":["wadl"]},"application/vnd.sun.xml.calc":{"source":"apache","extensions":["sxc"]},"application/vnd.sun.xml.calc.template":{"source":"apache","extensions":["stc"]},"application/vnd.sun.xml.draw":{"source":"apache","extensions":["sxd"]},"application/vnd.sun.xml.draw.template":{"source":"apache","extensions":["std"]},"application/vnd.sun.xml.impress":{"source":"apache","extensions":["sxi"]},"application/vnd.sun.xml.impress.template":{"source":"apache","extensions":["sti"]},"application/vnd.sun.xml.math":{"source":"apache","extensions":["sxm"]},"application/vnd.sun.xml.writer":{"source":"apache","extensions":["sxw"]},"application/vnd.sun.xml.writer.global":{"source":"apache","extensions":["sxg"]},"application/vnd.sun.xml.writer.template":{"source":"apache","extensions":["stw"]},"application/vnd.sus-calendar":{"source":"iana","extensions":["sus","susp"]},"application/vnd.svd":{"source":"iana","extensions":["svd"]},"application/vnd.swiftview-ics":{"source":"iana"},"application/vnd.sycle+xml":{"source":"iana","compressible":true},"application/vnd.symbian.install":{"source":"apache","extensions":["sis","sisx"]},"application/vnd.syncml+xml":{"source":"iana","charset":"UTF-8","compressible":true,"extensions":["xsm"]},"application/vnd.syncml.dm+wbxml":{"source":"iana","charset":"UTF-8","extensions":["bdm"]},"application/vnd.syncml.dm+xml":{"source":"iana","charset":"UTF-8","compressible":true,"extensions":["xdm"]},"application/vnd.syncml.dm.notification":{"source":"iana"},"application/vnd.syncml.dmddf+wbxml":{"source":"iana"},"application/vnd.syncml.dmddf+xml":{"source":"iana","charset":"UTF-8","compressible":true,"extensions":["ddf"]},"application/vnd.syncml.dmtnds+wbxml":{"source":"iana"},"application/vnd.syncml.dmtnds+xml":{"source":"iana","charset":"UTF-8","compressible":true},"application/vnd.syncml.ds.notification":{"source":"iana"},"application/vnd.tableschema+json":{"source":"iana","compressible":true},"application/vnd.tao.intent-module-archive":{"source":"iana","extensions":["tao"]},"application/vnd.tcpdump.pcap":{"source":"iana","extensions":["pcap","cap","dmp"]},"application/vnd.think-cell.ppttc+json":{"source":"iana","compressible":true},"application/vnd.tmd.mediaflex.api+xml":{"source":"iana","compressible":true},"application/vnd.tml":{"source":"iana"},"application/vnd.tmobile-livetv":{"source":"iana","extensions":["tmo"]},"application/vnd.tri.onesource":{"source":"iana"},"application/vnd.trid.tpt":{"source":"iana","extensions":["tpt"]},"application/vnd.triscape.mxs":{"source":"iana","extensions":["mxs"]},"application/vnd.trueapp":{"source":"iana","extensions":["tra"]},"application/vnd.truedoc":{"source":"iana"},"application/vnd.ubisoft.webplayer":{"source":"iana"},"application/vnd.ufdl":{"source":"iana","extensions":["ufd","ufdl"]},"application/vnd.uiq.theme":{"source":"iana","extensions":["utz"]},"application/vnd.umajin":{"source":"iana","extensions":["umj"]},"application/vnd.unity":{"source":"iana","extensions":["unityweb"]},"application/vnd.uoml+xml":{"source":"iana","compressible":true,"extensions":["uoml"]},"application/vnd.uplanet.alert":{"source":"iana"},"application/vnd.uplanet.alert-wbxml":{"source":"iana"},"application/vnd.uplanet.bearer-choice":{"source":"iana"},"application/vnd.uplanet.bearer-choice-wbxml":{"source":"iana"},"application/vnd.uplanet.cacheop":{"source":"iana"},"application/vnd.uplanet.cacheop-wbxml":{"source":"iana"},"application/vnd.uplanet.channel":{"source":"iana"},"application/vnd.uplanet.channel-wbxml":{"source":"iana"},"application/vnd.uplanet.list":{"source":"iana"},"application/vnd.uplanet.list-wbxml":{"source":"iana"},"application/vnd.uplanet.listcmd":{"source":"iana"},"application/vnd.uplanet.listcmd-wbxml":{"source":"iana"},"application/vnd.uplanet.signal":{"source":"iana"},"application/vnd.uri-map":{"source":"iana"},"application/vnd.valve.source.material":{"source":"iana"},"application/vnd.vcx":{"source":"iana","extensions":["vcx"]},"application/vnd.vd-study":{"source":"iana"},"application/vnd.vectorworks":{"source":"iana"},"application/vnd.vel+json":{"source":"iana","compressible":true},"application/vnd.verimatrix.vcas":{"source":"iana"},"application/vnd.veritone.aion+json":{"source":"iana","compressible":true},"application/vnd.veryant.thin":{"source":"iana"},"application/vnd.ves.encrypted":{"source":"iana"},"application/vnd.vidsoft.vidconference":{"source":"iana"},"application/vnd.visio":{"source":"iana","extensions":["vsd","vst","vss","vsw"]},"application/vnd.visionary":{"source":"iana","extensions":["vis"]},"application/vnd.vividence.scriptfile":{"source":"iana"},"application/vnd.vsf":{"source":"iana","extensions":["vsf"]},"application/vnd.wap.sic":{"source":"iana"},"application/vnd.wap.slc":{"source":"iana"},"application/vnd.wap.wbxml":{"source":"iana","charset":"UTF-8","extensions":["wbxml"]},"application/vnd.wap.wmlc":{"source":"iana","extensions":["wmlc"]},"application/vnd.wap.wmlscriptc":{"source":"iana","extensions":["wmlsc"]},"application/vnd.webturbo":{"source":"iana","extensions":["wtb"]},"application/vnd.wfa.dpp":{"source":"iana"},"application/vnd.wfa.p2p":{"source":"iana"},"application/vnd.wfa.wsc":{"source":"iana"},"application/vnd.windows.devicepairing":{"source":"iana"},"application/vnd.wmc":{"source":"iana"},"application/vnd.wmf.bootstrap":{"source":"iana"},"application/vnd.wolfram.mathematica":{"source":"iana"},"application/vnd.wolfram.mathematica.package":{"source":"iana"},"application/vnd.wolfram.player":{"source":"iana","extensions":["nbp"]},"application/vnd.wordperfect":{"source":"iana","extensions":["wpd"]},"application/vnd.wqd":{"source":"iana","extensions":["wqd"]},"application/vnd.wrq-hp3000-labelled":{"source":"iana"},"application/vnd.wt.stf":{"source":"iana","extensions":["stf"]},"application/vnd.wv.csp+wbxml":{"source":"iana"},"application/vnd.wv.csp+xml":{"source":"iana","compressible":true},"application/vnd.wv.ssp+xml":{"source":"iana","compressible":true},"application/vnd.xacml+json":{"source":"iana","compressible":true},"application/vnd.xara":{"source":"iana","extensions":["xar"]},"application/vnd.xfdl":{"source":"iana","extensions":["xfdl"]},"application/vnd.xfdl.webform":{"source":"iana"},"application/vnd.xmi+xml":{"source":"iana","compressible":true},"application/vnd.xmpie.cpkg":{"source":"iana"},"application/vnd.xmpie.dpkg":{"source":"iana"},"application/vnd.xmpie.plan":{"source":"iana"},"application/vnd.xmpie.ppkg":{"source":"iana"},"application/vnd.xmpie.xlim":{"source":"iana"},"application/vnd.yamaha.hv-dic":{"source":"iana","extensions":["hvd"]},"application/vnd.yamaha.hv-script":{"source":"iana","extensions":["hvs"]},"application/vnd.yamaha.hv-voice":{"source":"iana","extensions":["hvp"]},"application/vnd.yamaha.openscoreformat":{"source":"iana","extensions":["osf"]},"application/vnd.yamaha.openscoreformat.osfpvg+xml":{"source":"iana","compressible":true,"extensions":["osfpvg"]},"application/vnd.yamaha.remote-setup":{"source":"iana"},"application/vnd.yamaha.smaf-audio":{"source":"iana","extensions":["saf"]},"application/vnd.yamaha.smaf-phrase":{"source":"iana","extensions":["spf"]},"application/vnd.yamaha.through-ngn":{"source":"iana"},"application/vnd.yamaha.tunnel-udpencap":{"source":"iana"},"application/vnd.yaoweme":{"source":"iana"},"application/vnd.yellowriver-custom-menu":{"source":"iana","extensions":["cmp"]},"application/vnd.youtube.yt":{"source":"iana"},"application/vnd.zul":{"source":"iana","extensions":["zir","zirz"]},"application/vnd.zzazz.deck+xml":{"source":"iana","compressible":true,"extensions":["zaz"]},"application/voicexml+xml":{"source":"iana","compressible":true,"extensions":["vxml"]},"application/voucher-cms+json":{"source":"iana","compressible":true},"application/vq-rtcpxr":{"source":"iana"},"application/wasm":{"source":"iana","compressible":true,"extensions":["wasm"]},"application/watcherinfo+xml":{"source":"iana","compressible":true},"application/webpush-options+json":{"source":"iana","compressible":true},"application/whoispp-query":{"source":"iana"},"application/whoispp-response":{"source":"iana"},"application/widget":{"source":"iana","extensions":["wgt"]},"application/winhlp":{"source":"apache","extensions":["hlp"]},"application/wita":{"source":"iana"},"application/wordperfect5.1":{"source":"iana"},"application/wsdl+xml":{"source":"iana","compressible":true,"extensions":["wsdl"]},"application/wspolicy+xml":{"source":"iana","compressible":true,"extensions":["wspolicy"]},"application/x-7z-compressed":{"source":"apache","compressible":false,"extensions":["7z"]},"application/x-abiword":{"source":"apache","extensions":["abw"]},"application/x-ace-compressed":{"source":"apache","extensions":["ace"]},"application/x-amf":{"source":"apache"},"application/x-apple-diskimage":{"source":"apache","extensions":["dmg"]},"application/x-arj":{"compressible":false,"extensions":["arj"]},"application/x-authorware-bin":{"source":"apache","extensions":["aab","x32","u32","vox"]},"application/x-authorware-map":{"source":"apache","extensions":["aam"]},"application/x-authorware-seg":{"source":"apache","extensions":["aas"]},"application/x-bcpio":{"source":"apache","extensions":["bcpio"]},"application/x-bdoc":{"compressible":false,"extensions":["bdoc"]},"application/x-bittorrent":{"source":"apache","extensions":["torrent"]},"application/x-blorb":{"source":"apache","extensions":["blb","blorb"]},"application/x-bzip":{"source":"apache","compressible":false,"extensions":["bz"]},"application/x-bzip2":{"source":"apache","compressible":false,"extensions":["bz2","boz"]},"application/x-cbr":{"source":"apache","extensions":["cbr","cba","cbt","cbz","cb7"]},"application/x-cdlink":{"source":"apache","extensions":["vcd"]},"application/x-cfs-compressed":{"source":"apache","extensions":["cfs"]},"application/x-chat":{"source":"apache","extensions":["chat"]},"application/x-chess-pgn":{"source":"apache","extensions":["pgn"]},"application/x-chrome-extension":{"extensions":["crx"]},"application/x-cocoa":{"source":"nginx","extensions":["cco"]},"application/x-compress":{"source":"apache"},"application/x-conference":{"source":"apache","extensions":["nsc"]},"application/x-cpio":{"source":"apache","extensions":["cpio"]},"application/x-csh":{"source":"apache","extensions":["csh"]},"application/x-deb":{"compressible":false},"application/x-debian-package":{"source":"apache","extensions":["deb","udeb"]},"application/x-dgc-compressed":{"source":"apache","extensions":["dgc"]},"application/x-director":{"source":"apache","extensions":["dir","dcr","dxr","cst","cct","cxt","w3d","fgd","swa"]},"application/x-doom":{"source":"apache","extensions":["wad"]},"application/x-dtbncx+xml":{"source":"apache","compressible":true,"extensions":["ncx"]},"application/x-dtbook+xml":{"source":"apache","compressible":true,"extensions":["dtb"]},"application/x-dtbresource+xml":{"source":"apache","compressible":true,"extensions":["res"]},"application/x-dvi":{"source":"apache","compressible":false,"extensions":["dvi"]},"application/x-envoy":{"source":"apache","extensions":["evy"]},"application/x-eva":{"source":"apache","extensions":["eva"]},"application/x-font-bdf":{"source":"apache","extensions":["bdf"]},"application/x-font-dos":{"source":"apache"},"application/x-font-framemaker":{"source":"apache"},"application/x-font-ghostscript":{"source":"apache","extensions":["gsf"]},"application/x-font-libgrx":{"source":"apache"},"application/x-font-linux-psf":{"source":"apache","extensions":["psf"]},"application/x-font-pcf":{"source":"apache","extensions":["pcf"]},"application/x-font-snf":{"source":"apache","extensions":["snf"]},"application/x-font-speedo":{"source":"apache"},"application/x-font-sunos-news":{"source":"apache"},"application/x-font-type1":{"source":"apache","extensions":["pfa","pfb","pfm","afm"]},"application/x-font-vfont":{"source":"apache"},"application/x-freearc":{"source":"apache","extensions":["arc"]},"application/x-futuresplash":{"source":"apache","extensions":["spl"]},"application/x-gca-compressed":{"source":"apache","extensions":["gca"]},"application/x-glulx":{"source":"apache","extensions":["ulx"]},"application/x-gnumeric":{"source":"apache","extensions":["gnumeric"]},"application/x-gramps-xml":{"source":"apache","extensions":["gramps"]},"application/x-gtar":{"source":"apache","extensions":["gtar"]},"application/x-gzip":{"source":"apache"},"application/x-hdf":{"source":"apache","extensions":["hdf"]},"application/x-httpd-php":{"compressible":true,"extensions":["php"]},"application/x-install-instructions":{"source":"apache","extensions":["install"]},"application/x-iso9660-image":{"source":"apache","extensions":["iso"]},"application/x-iwork-keynote-sffkey":{"extensions":["key"]},"application/x-iwork-numbers-sffnumbers":{"extensions":["numbers"]},"application/x-iwork-pages-sffpages":{"extensions":["pages"]},"application/x-java-archive-diff":{"source":"nginx","extensions":["jardiff"]},"application/x-java-jnlp-file":{"source":"apache","compressible":false,"extensions":["jnlp"]},"application/x-javascript":{"compressible":true},"application/x-keepass2":{"extensions":["kdbx"]},"application/x-latex":{"source":"apache","compressible":false,"extensions":["latex"]},"application/x-lua-bytecode":{"extensions":["luac"]},"application/x-lzh-compressed":{"source":"apache","extensions":["lzh","lha"]},"application/x-makeself":{"source":"nginx","extensions":["run"]},"application/x-mie":{"source":"apache","extensions":["mie"]},"application/x-mobipocket-ebook":{"source":"apache","extensions":["prc","mobi"]},"application/x-mpegurl":{"compressible":false},"application/x-ms-application":{"source":"apache","extensions":["application"]},"application/x-ms-shortcut":{"source":"apache","extensions":["lnk"]},"application/x-ms-wmd":{"source":"apache","extensions":["wmd"]},"application/x-ms-wmz":{"source":"apache","extensions":["wmz"]},"application/x-ms-xbap":{"source":"apache","extensions":["xbap"]},"application/x-msaccess":{"source":"apache","extensions":["mdb"]},"application/x-msbinder":{"source":"apache","extensions":["obd"]},"application/x-mscardfile":{"source":"apache","extensions":["crd"]},"application/x-msclip":{"source":"apache","extensions":["clp"]},"application/x-msdos-program":{"extensions":["exe"]},"application/x-msdownload":{"source":"apache","extensions":["exe","dll","com","bat","msi"]},"application/x-msmediaview":{"source":"apache","extensions":["mvb","m13","m14"]},"application/x-msmetafile":{"source":"apache","extensions":["wmf","wmz","emf","emz"]},"application/x-msmoney":{"source":"apache","extensions":["mny"]},"application/x-mspublisher":{"source":"apache","extensions":["pub"]},"application/x-msschedule":{"source":"apache","extensions":["scd"]},"application/x-msterminal":{"source":"apache","extensions":["trm"]},"application/x-mswrite":{"source":"apache","extensions":["wri"]},"application/x-netcdf":{"source":"apache","extensions":["nc","cdf"]},"application/x-ns-proxy-autoconfig":{"compressible":true,"extensions":["pac"]},"application/x-nzb":{"source":"apache","extensions":["nzb"]},"application/x-perl":{"source":"nginx","extensions":["pl","pm"]},"application/x-pilot":{"source":"nginx","extensions":["prc","pdb"]},"application/x-pkcs12":{"source":"apache","compressible":false,"extensions":["p12","pfx"]},"application/x-pkcs7-certificates":{"source":"apache","extensions":["p7b","spc"]},"application/x-pkcs7-certreqresp":{"source":"apache","extensions":["p7r"]},"application/x-pki-message":{"source":"iana"},"application/x-rar-compressed":{"source":"apache","compressible":false,"extensions":["rar"]},"application/x-redhat-package-manager":{"source":"nginx","extensions":["rpm"]},"application/x-research-info-systems":{"source":"apache","extensions":["ris"]},"application/x-sea":{"source":"nginx","extensions":["sea"]},"application/x-sh":{"source":"apache","compressible":true,"extensions":["sh"]},"application/x-shar":{"source":"apache","extensions":["shar"]},"application/x-shockwave-flash":{"source":"apache","compressible":false,"extensions":["swf"]},"application/x-silverlight-app":{"source":"apache","extensions":["xap"]},"application/x-sql":{"source":"apache","extensions":["sql"]},"application/x-stuffit":{"source":"apache","compressible":false,"extensions":["sit"]},"application/x-stuffitx":{"source":"apache","extensions":["sitx"]},"application/x-subrip":{"source":"apache","extensions":["srt"]},"application/x-sv4cpio":{"source":"apache","extensions":["sv4cpio"]},"application/x-sv4crc":{"source":"apache","extensions":["sv4crc"]},"application/x-t3vm-image":{"source":"apache","extensions":["t3"]},"application/x-tads":{"source":"apache","extensions":["gam"]},"application/x-tar":{"source":"apache","compressible":true,"extensions":["tar"]},"application/x-tcl":{"source":"apache","extensions":["tcl","tk"]},"application/x-tex":{"source":"apache","extensions":["tex"]},"application/x-tex-tfm":{"source":"apache","extensions":["tfm"]},"application/x-texinfo":{"source":"apache","extensions":["texinfo","texi"]},"application/x-tgif":{"source":"apache","extensions":["obj"]},"application/x-ustar":{"source":"apache","extensions":["ustar"]},"application/x-virtualbox-hdd":{"compressible":true,"extensions":["hdd"]},"application/x-virtualbox-ova":{"compressible":true,"extensions":["ova"]},"application/x-virtualbox-ovf":{"compressible":true,"extensions":["ovf"]},"application/x-virtualbox-vbox":{"compressible":true,"extensions":["vbox"]},"application/x-virtualbox-vbox-extpack":{"compressible":false,"extensions":["vbox-extpack"]},"application/x-virtualbox-vdi":{"compressible":true,"extensions":["vdi"]},"application/x-virtualbox-vhd":{"compressible":true,"extensions":["vhd"]},"application/x-virtualbox-vmdk":{"compressible":true,"extensions":["vmdk"]},"application/x-wais-source":{"source":"apache","extensions":["src"]},"application/x-web-app-manifest+json":{"compressible":true,"extensions":["webapp"]},"application/x-www-form-urlencoded":{"source":"iana","compressible":true},"application/x-x509-ca-cert":{"source":"iana","extensions":["der","crt","pem"]},"application/x-x509-ca-ra-cert":{"source":"iana"},"application/x-x509-next-ca-cert":{"source":"iana"},"application/x-xfig":{"source":"apache","extensions":["fig"]},"application/x-xliff+xml":{"source":"apache","compressible":true,"extensions":["xlf"]},"application/x-xpinstall":{"source":"apache","compressible":false,"extensions":["xpi"]},"application/x-xz":{"source":"apache","extensions":["xz"]},"application/x-zmachine":{"source":"apache","extensions":["z1","z2","z3","z4","z5","z6","z7","z8"]},"application/x400-bp":{"source":"iana"},"application/xacml+xml":{"source":"iana","compressible":true},"application/xaml+xml":{"source":"apache","compressible":true,"extensions":["xaml"]},"application/xcap-att+xml":{"source":"iana","compressible":true,"extensions":["xav"]},"application/xcap-caps+xml":{"source":"iana","compressible":true,"extensions":["xca"]},"application/xcap-diff+xml":{"source":"iana","compressible":true,"extensions":["xdf"]},"application/xcap-el+xml":{"source":"iana","compressible":true,"extensions":["xel"]},"application/xcap-error+xml":{"source":"iana","compressible":true},"application/xcap-ns+xml":{"source":"iana","compressible":true,"extensions":["xns"]},"application/xcon-conference-info+xml":{"source":"iana","compressible":true},"application/xcon-conference-info-diff+xml":{"source":"iana","compressible":true},"application/xenc+xml":{"source":"iana","compressible":true,"extensions":["xenc"]},"application/xhtml+xml":{"source":"iana","compressible":true,"extensions":["xhtml","xht"]},"application/xhtml-voice+xml":{"source":"apache","compressible":true},"application/xliff+xml":{"source":"iana","compressible":true,"extensions":["xlf"]},"application/xml":{"source":"iana","compressible":true,"extensions":["xml","xsl","xsd","rng"]},"application/xml-dtd":{"source":"iana","compressible":true,"extensions":["dtd"]},"application/xml-external-parsed-entity":{"source":"iana"},"application/xml-patch+xml":{"source":"iana","compressible":true},"application/xmpp+xml":{"source":"iana","compressible":true},"application/xop+xml":{"source":"iana","compressible":true,"extensions":["xop"]},"application/xproc+xml":{"source":"apache","compressible":true,"extensions":["xpl"]},"application/xslt+xml":{"source":"iana","compressible":true,"extensions":["xsl","xslt"]},"application/xspf+xml":{"source":"apache","compressible":true,"extensions":["xspf"]},"application/xv+xml":{"source":"iana","compressible":true,"extensions":["mxml","xhvml","xvml","xvm"]},"application/yang":{"source":"iana","extensions":["yang"]},"application/yang-data+json":{"source":"iana","compressible":true},"application/yang-data+xml":{"source":"iana","compressible":true},"application/yang-patch+json":{"source":"iana","compressible":true},"application/yang-patch+xml":{"source":"iana","compressible":true},"application/yin+xml":{"source":"iana","compressible":true,"extensions":["yin"]},"application/zip":{"source":"iana","compressible":false,"extensions":["zip"]},"application/zlib":{"source":"iana"},"application/zstd":{"source":"iana"},"audio/1d-interleaved-parityfec":{"source":"iana"},"audio/32kadpcm":{"source":"iana"},"audio/3gpp":{"source":"iana","compressible":false,"extensions":["3gpp"]},"audio/3gpp2":{"source":"iana"},"audio/aac":{"source":"iana"},"audio/ac3":{"source":"iana"},"audio/adpcm":{"source":"apache","extensions":["adp"]},"audio/amr":{"source":"iana","extensions":["amr"]},"audio/amr-wb":{"source":"iana"},"audio/amr-wb+":{"source":"iana"},"audio/aptx":{"source":"iana"},"audio/asc":{"source":"iana"},"audio/atrac-advanced-lossless":{"source":"iana"},"audio/atrac-x":{"source":"iana"},"audio/atrac3":{"source":"iana"},"audio/basic":{"source":"iana","compressible":false,"extensions":["au","snd"]},"audio/bv16":{"source":"iana"},"audio/bv32":{"source":"iana"},"audio/clearmode":{"source":"iana"},"audio/cn":{"source":"iana"},"audio/dat12":{"source":"iana"},"audio/dls":{"source":"iana"},"audio/dsr-es201108":{"source":"iana"},"audio/dsr-es202050":{"source":"iana"},"audio/dsr-es202211":{"source":"iana"},"audio/dsr-es202212":{"source":"iana"},"audio/dv":{"source":"iana"},"audio/dvi4":{"source":"iana"},"audio/eac3":{"source":"iana"},"audio/encaprtp":{"source":"iana"},"audio/evrc":{"source":"iana"},"audio/evrc-qcp":{"source":"iana"},"audio/evrc0":{"source":"iana"},"audio/evrc1":{"source":"iana"},"audio/evrcb":{"source":"iana"},"audio/evrcb0":{"source":"iana"},"audio/evrcb1":{"source":"iana"},"audio/evrcnw":{"source":"iana"},"audio/evrcnw0":{"source":"iana"},"audio/evrcnw1":{"source":"iana"},"audio/evrcwb":{"source":"iana"},"audio/evrcwb0":{"source":"iana"},"audio/evrcwb1":{"source":"iana"},"audio/evs":{"source":"iana"},"audio/flexfec":{"source":"iana"},"audio/fwdred":{"source":"iana"},"audio/g711-0":{"source":"iana"},"audio/g719":{"source":"iana"},"audio/g722":{"source":"iana"},"audio/g7221":{"source":"iana"},"audio/g723":{"source":"iana"},"audio/g726-16":{"source":"iana"},"audio/g726-24":{"source":"iana"},"audio/g726-32":{"source":"iana"},"audio/g726-40":{"source":"iana"},"audio/g728":{"source":"iana"},"audio/g729":{"source":"iana"},"audio/g7291":{"source":"iana"},"audio/g729d":{"source":"iana"},"audio/g729e":{"source":"iana"},"audio/gsm":{"source":"iana"},"audio/gsm-efr":{"source":"iana"},"audio/gsm-hr-08":{"source":"iana"},"audio/ilbc":{"source":"iana"},"audio/ip-mr_v2.5":{"source":"iana"},"audio/isac":{"source":"apache"},"audio/l16":{"source":"iana"},"audio/l20":{"source":"iana"},"audio/l24":{"source":"iana","compressible":false},"audio/l8":{"source":"iana"},"audio/lpc":{"source":"iana"},"audio/melp":{"source":"iana"},"audio/melp1200":{"source":"iana"},"audio/melp2400":{"source":"iana"},"audio/melp600":{"source":"iana"},"audio/mhas":{"source":"iana"},"audio/midi":{"source":"apache","extensions":["mid","midi","kar","rmi"]},"audio/mobile-xmf":{"source":"iana","extensions":["mxmf"]},"audio/mp3":{"compressible":false,"extensions":["mp3"]},"audio/mp4":{"source":"iana","compressible":false,"extensions":["m4a","mp4a"]},"audio/mp4a-latm":{"source":"iana"},"audio/mpa":{"source":"iana"},"audio/mpa-robust":{"source":"iana"},"audio/mpeg":{"source":"iana","compressible":false,"extensions":["mpga","mp2","mp2a","mp3","m2a","m3a"]},"audio/mpeg4-generic":{"source":"iana"},"audio/musepack":{"source":"apache"},"audio/ogg":{"source":"iana","compressible":false,"extensions":["oga","ogg","spx","opus"]},"audio/opus":{"source":"iana"},"audio/parityfec":{"source":"iana"},"audio/pcma":{"source":"iana"},"audio/pcma-wb":{"source":"iana"},"audio/pcmu":{"source":"iana"},"audio/pcmu-wb":{"source":"iana"},"audio/prs.sid":{"source":"iana"},"audio/qcelp":{"source":"iana"},"audio/raptorfec":{"source":"iana"},"audio/red":{"source":"iana"},"audio/rtp-enc-aescm128":{"source":"iana"},"audio/rtp-midi":{"source":"iana"},"audio/rtploopback":{"source":"iana"},"audio/rtx":{"source":"iana"},"audio/s3m":{"source":"apache","extensions":["s3m"]},"audio/scip":{"source":"iana"},"audio/silk":{"source":"apache","extensions":["sil"]},"audio/smv":{"source":"iana"},"audio/smv-qcp":{"source":"iana"},"audio/smv0":{"source":"iana"},"audio/sofa":{"source":"iana"},"audio/sp-midi":{"source":"iana"},"audio/speex":{"source":"iana"},"audio/t140c":{"source":"iana"},"audio/t38":{"source":"iana"},"audio/telephone-event":{"source":"iana"},"audio/tetra_acelp":{"source":"iana"},"audio/tetra_acelp_bb":{"source":"iana"},"audio/tone":{"source":"iana"},"audio/tsvcis":{"source":"iana"},"audio/uemclip":{"source":"iana"},"audio/ulpfec":{"source":"iana"},"audio/usac":{"source":"iana"},"audio/vdvi":{"source":"iana"},"audio/vmr-wb":{"source":"iana"},"audio/vnd.3gpp.iufp":{"source":"iana"},"audio/vnd.4sb":{"source":"iana"},"audio/vnd.audiokoz":{"source":"iana"},"audio/vnd.celp":{"source":"iana"},"audio/vnd.cisco.nse":{"source":"iana"},"audio/vnd.cmles.radio-events":{"source":"iana"},"audio/vnd.cns.anp1":{"source":"iana"},"audio/vnd.cns.inf1":{"source":"iana"},"audio/vnd.dece.audio":{"source":"iana","extensions":["uva","uvva"]},"audio/vnd.digital-winds":{"source":"iana","extensions":["eol"]},"audio/vnd.dlna.adts":{"source":"iana"},"audio/vnd.dolby.heaac.1":{"source":"iana"},"audio/vnd.dolby.heaac.2":{"source":"iana"},"audio/vnd.dolby.mlp":{"source":"iana"},"audio/vnd.dolby.mps":{"source":"iana"},"audio/vnd.dolby.pl2":{"source":"iana"},"audio/vnd.dolby.pl2x":{"source":"iana"},"audio/vnd.dolby.pl2z":{"source":"iana"},"audio/vnd.dolby.pulse.1":{"source":"iana"},"audio/vnd.dra":{"source":"iana","extensions":["dra"]},"audio/vnd.dts":{"source":"iana","extensions":["dts"]},"audio/vnd.dts.hd":{"source":"iana","extensions":["dtshd"]},"audio/vnd.dts.uhd":{"source":"iana"},"audio/vnd.dvb.file":{"source":"iana"},"audio/vnd.everad.plj":{"source":"iana"},"audio/vnd.hns.audio":{"source":"iana"},"audio/vnd.lucent.voice":{"source":"iana","extensions":["lvp"]},"audio/vnd.ms-playready.media.pya":{"source":"iana","extensions":["pya"]},"audio/vnd.nokia.mobile-xmf":{"source":"iana"},"audio/vnd.nortel.vbk":{"source":"iana"},"audio/vnd.nuera.ecelp4800":{"source":"iana","extensions":["ecelp4800"]},"audio/vnd.nuera.ecelp7470":{"source":"iana","extensions":["ecelp7470"]},"audio/vnd.nuera.ecelp9600":{"source":"iana","extensions":["ecelp9600"]},"audio/vnd.octel.sbc":{"source":"iana"},"audio/vnd.presonus.multitrack":{"source":"iana"},"audio/vnd.qcelp":{"source":"iana"},"audio/vnd.rhetorex.32kadpcm":{"source":"iana"},"audio/vnd.rip":{"source":"iana","extensions":["rip"]},"audio/vnd.rn-realaudio":{"compressible":false},"audio/vnd.sealedmedia.softseal.mpeg":{"source":"iana"},"audio/vnd.vmx.cvsd":{"source":"iana"},"audio/vnd.wave":{"compressible":false},"audio/vorbis":{"source":"iana","compressible":false},"audio/vorbis-config":{"source":"iana"},"audio/wav":{"compressible":false,"extensions":["wav"]},"audio/wave":{"compressible":false,"extensions":["wav"]},"audio/webm":{"source":"apache","compressible":false,"extensions":["weba"]},"audio/x-aac":{"source":"apache","compressible":false,"extensions":["aac"]},"audio/x-aiff":{"source":"apache","extensions":["aif","aiff","aifc"]},"audio/x-caf":{"source":"apache","compressible":false,"extensions":["caf"]},"audio/x-flac":{"source":"apache","extensions":["flac"]},"audio/x-m4a":{"source":"nginx","extensions":["m4a"]},"audio/x-matroska":{"source":"apache","extensions":["mka"]},"audio/x-mpegurl":{"source":"apache","extensions":["m3u"]},"audio/x-ms-wax":{"source":"apache","extensions":["wax"]},"audio/x-ms-wma":{"source":"apache","extensions":["wma"]},"audio/x-pn-realaudio":{"source":"apache","extensions":["ram","ra"]},"audio/x-pn-realaudio-plugin":{"source":"apache","extensions":["rmp"]},"audio/x-realaudio":{"source":"nginx","extensions":["ra"]},"audio/x-tta":{"source":"apache"},"audio/x-wav":{"source":"apache","extensions":["wav"]},"audio/xm":{"source":"apache","extensions":["xm"]},"chemical/x-cdx":{"source":"apache","extensions":["cdx"]},"chemical/x-cif":{"source":"apache","extensions":["cif"]},"chemical/x-cmdf":{"source":"apache","extensions":["cmdf"]},"chemical/x-cml":{"source":"apache","extensions":["cml"]},"chemical/x-csml":{"source":"apache","extensions":["csml"]},"chemical/x-pdb":{"source":"apache"},"chemical/x-xyz":{"source":"apache","extensions":["xyz"]},"font/collection":{"source":"iana","extensions":["ttc"]},"font/otf":{"source":"iana","compressible":true,"extensions":["otf"]},"font/sfnt":{"source":"iana"},"font/ttf":{"source":"iana","compressible":true,"extensions":["ttf"]},"font/woff":{"source":"iana","extensions":["woff"]},"font/woff2":{"source":"iana","extensions":["woff2"]},"image/aces":{"source":"iana","extensions":["exr"]},"image/apng":{"compressible":false,"extensions":["apng"]},"image/avci":{"source":"iana"},"image/avcs":{"source":"iana"},"image/avif":{"source":"iana","compressible":false,"extensions":["avif"]},"image/bmp":{"source":"iana","compressible":true,"extensions":["bmp"]},"image/cgm":{"source":"iana","extensions":["cgm"]},"image/dicom-rle":{"source":"iana","extensions":["drle"]},"image/emf":{"source":"iana","extensions":["emf"]},"image/fits":{"source":"iana","extensions":["fits"]},"image/g3fax":{"source":"iana","extensions":["g3"]},"image/gif":{"source":"iana","compressible":false,"extensions":["gif"]},"image/heic":{"source":"iana","extensions":["heic"]},"image/heic-sequence":{"source":"iana","extensions":["heics"]},"image/heif":{"source":"iana","extensions":["heif"]},"image/heif-sequence":{"source":"iana","extensions":["heifs"]},"image/hej2k":{"source":"iana","extensions":["hej2"]},"image/hsj2":{"source":"iana","extensions":["hsj2"]},"image/ief":{"source":"iana","extensions":["ief"]},"image/jls":{"source":"iana","extensions":["jls"]},"image/jp2":{"source":"iana","compressible":false,"extensions":["jp2","jpg2"]},"image/jpeg":{"source":"iana","compressible":false,"extensions":["jpeg","jpg","jpe"]},"image/jph":{"source":"iana","extensions":["jph"]},"image/jphc":{"source":"iana","extensions":["jhc"]},"image/jpm":{"source":"iana","compressible":false,"extensions":["jpm"]},"image/jpx":{"source":"iana","compressible":false,"extensions":["jpx","jpf"]},"image/jxr":{"source":"iana","extensions":["jxr"]},"image/jxra":{"source":"iana","extensions":["jxra"]},"image/jxrs":{"source":"iana","extensions":["jxrs"]},"image/jxs":{"source":"iana","extensions":["jxs"]},"image/jxsc":{"source":"iana","extensions":["jxsc"]},"image/jxsi":{"source":"iana","extensions":["jxsi"]},"image/jxss":{"source":"iana","extensions":["jxss"]},"image/ktx":{"source":"iana","extensions":["ktx"]},"image/ktx2":{"source":"iana","extensions":["ktx2"]},"image/naplps":{"source":"iana"},"image/pjpeg":{"compressible":false},"image/png":{"source":"iana","compressible":false,"extensions":["png"]},"image/prs.btif":{"source":"iana","extensions":["btif"]},"image/prs.pti":{"source":"iana","extensions":["pti"]},"image/pwg-raster":{"source":"iana"},"image/sgi":{"source":"apache","extensions":["sgi"]},"image/svg+xml":{"source":"iana","compressible":true,"extensions":["svg","svgz"]},"image/t38":{"source":"iana","extensions":["t38"]},"image/tiff":{"source":"iana","compressible":false,"extensions":["tif","tiff"]},"image/tiff-fx":{"source":"iana","extensions":["tfx"]},"image/vnd.adobe.photoshop":{"source":"iana","compressible":true,"extensions":["psd"]},"image/vnd.airzip.accelerator.azv":{"source":"iana","extensions":["azv"]},"image/vnd.cns.inf2":{"source":"iana"},"image/vnd.dece.graphic":{"source":"iana","extensions":["uvi","uvvi","uvg","uvvg"]},"image/vnd.djvu":{"source":"iana","extensions":["djvu","djv"]},"image/vnd.dvb.subtitle":{"source":"iana","extensions":["sub"]},"image/vnd.dwg":{"source":"iana","extensions":["dwg"]},"image/vnd.dxf":{"source":"iana","extensions":["dxf"]},"image/vnd.fastbidsheet":{"source":"iana","extensions":["fbs"]},"image/vnd.fpx":{"source":"iana","extensions":["fpx"]},"image/vnd.fst":{"source":"iana","extensions":["fst"]},"image/vnd.fujixerox.edmics-mmr":{"source":"iana","extensions":["mmr"]},"image/vnd.fujixerox.edmics-rlc":{"source":"iana","extensions":["rlc"]},"image/vnd.globalgraphics.pgb":{"source":"iana"},"image/vnd.microsoft.icon":{"source":"iana","extensions":["ico"]},"image/vnd.mix":{"source":"iana"},"image/vnd.mozilla.apng":{"source":"iana"},"image/vnd.ms-dds":{"extensions":["dds"]},"image/vnd.ms-modi":{"source":"iana","extensions":["mdi"]},"image/vnd.ms-photo":{"source":"apache","extensions":["wdp"]},"image/vnd.net-fpx":{"source":"iana","extensions":["npx"]},"image/vnd.pco.b16":{"source":"iana","extensions":["b16"]},"image/vnd.radiance":{"source":"iana"},"image/vnd.sealed.png":{"source":"iana"},"image/vnd.sealedmedia.softseal.gif":{"source":"iana"},"image/vnd.sealedmedia.softseal.jpg":{"source":"iana"},"image/vnd.svf":{"source":"iana"},"image/vnd.tencent.tap":{"source":"iana","extensions":["tap"]},"image/vnd.valve.source.texture":{"source":"iana","extensions":["vtf"]},"image/vnd.wap.wbmp":{"source":"iana","extensions":["wbmp"]},"image/vnd.xiff":{"source":"iana","extensions":["xif"]},"image/vnd.zbrush.pcx":{"source":"iana","extensions":["pcx"]},"image/webp":{"source":"apache","extensions":["webp"]},"image/wmf":{"source":"iana","extensions":["wmf"]},"image/x-3ds":{"source":"apache","extensions":["3ds"]},"image/x-cmu-raster":{"source":"apache","extensions":["ras"]},"image/x-cmx":{"source":"apache","extensions":["cmx"]},"image/x-freehand":{"source":"apache","extensions":["fh","fhc","fh4","fh5","fh7"]},"image/x-icon":{"source":"apache","compressible":true,"extensions":["ico"]},"image/x-jng":{"source":"nginx","extensions":["jng"]},"image/x-mrsid-image":{"source":"apache","extensions":["sid"]},"image/x-ms-bmp":{"source":"nginx","compressible":true,"extensions":["bmp"]},"image/x-pcx":{"source":"apache","extensions":["pcx"]},"image/x-pict":{"source":"apache","extensions":["pic","pct"]},"image/x-portable-anymap":{"source":"apache","extensions":["pnm"]},"image/x-portable-bitmap":{"source":"apache","extensions":["pbm"]},"image/x-portable-graymap":{"source":"apache","extensions":["pgm"]},"image/x-portable-pixmap":{"source":"apache","extensions":["ppm"]},"image/x-rgb":{"source":"apache","extensions":["rgb"]},"image/x-tga":{"source":"apache","extensions":["tga"]},"image/x-xbitmap":{"source":"apache","extensions":["xbm"]},"image/x-xcf":{"compressible":false},"image/x-xpixmap":{"source":"apache","extensions":["xpm"]},"image/x-xwindowdump":{"source":"apache","extensions":["xwd"]},"message/cpim":{"source":"iana"},"message/delivery-status":{"source":"iana"},"message/disposition-notification":{"source":"iana","extensions":["disposition-notification"]},"message/external-body":{"source":"iana"},"message/feedback-report":{"source":"iana"},"message/global":{"source":"iana","extensions":["u8msg"]},"message/global-delivery-status":{"source":"iana","extensions":["u8dsn"]},"message/global-disposition-notification":{"source":"iana","extensions":["u8mdn"]},"message/global-headers":{"source":"iana","extensions":["u8hdr"]},"message/http":{"source":"iana","compressible":false},"message/imdn+xml":{"source":"iana","compressible":true},"message/news":{"source":"iana"},"message/partial":{"source":"iana","compressible":false},"message/rfc822":{"source":"iana","compressible":true,"extensions":["eml","mime"]},"message/s-http":{"source":"iana"},"message/sip":{"source":"iana"},"message/sipfrag":{"source":"iana"},"message/tracking-status":{"source":"iana"},"message/vnd.si.simp":{"source":"iana"},"message/vnd.wfa.wsc":{"source":"iana","extensions":["wsc"]},"model/3mf":{"source":"iana","extensions":["3mf"]},"model/e57":{"source":"iana"},"model/gltf+json":{"source":"iana","compressible":true,"extensions":["gltf"]},"model/gltf-binary":{"source":"iana","compressible":true,"extensions":["glb"]},"model/iges":{"source":"iana","compressible":false,"extensions":["igs","iges"]},"model/mesh":{"source":"iana","compressible":false,"extensions":["msh","mesh","silo"]},"model/mtl":{"source":"iana","extensions":["mtl"]},"model/obj":{"source":"iana","extensions":["obj"]},"model/step":{"source":"iana"},"model/step+xml":{"source":"iana","compressible":true,"extensions":["stpx"]},"model/step+zip":{"source":"iana","compressible":false,"extensions":["stpz"]},"model/step-xml+zip":{"source":"iana","compressible":false,"extensions":["stpxz"]},"model/stl":{"source":"iana","extensions":["stl"]},"model/vnd.collada+xml":{"source":"iana","compressible":true,"extensions":["dae"]},"model/vnd.dwf":{"source":"iana","extensions":["dwf"]},"model/vnd.flatland.3dml":{"source":"iana"},"model/vnd.gdl":{"source":"iana","extensions":["gdl"]},"model/vnd.gs-gdl":{"source":"apache"},"model/vnd.gs.gdl":{"source":"iana"},"model/vnd.gtw":{"source":"iana","extensions":["gtw"]},"model/vnd.moml+xml":{"source":"iana","compressible":true},"model/vnd.mts":{"source":"iana","extensions":["mts"]},"model/vnd.opengex":{"source":"iana","extensions":["ogex"]},"model/vnd.parasolid.transmit.binary":{"source":"iana","extensions":["x_b"]},"model/vnd.parasolid.transmit.text":{"source":"iana","extensions":["x_t"]},"model/vnd.pytha.pyox":{"source":"iana"},"model/vnd.rosette.annotated-data-model":{"source":"iana"},"model/vnd.sap.vds":{"source":"iana","extensions":["vds"]},"model/vnd.usdz+zip":{"source":"iana","compressible":false,"extensions":["usdz"]},"model/vnd.valve.source.compiled-map":{"source":"iana","extensions":["bsp"]},"model/vnd.vtu":{"source":"iana","extensions":["vtu"]},"model/vrml":{"source":"iana","compressible":false,"extensions":["wrl","vrml"]},"model/x3d+binary":{"source":"apache","compressible":false,"extensions":["x3db","x3dbz"]},"model/x3d+fastinfoset":{"source":"iana","extensions":["x3db"]},"model/x3d+vrml":{"source":"apache","compressible":false,"extensions":["x3dv","x3dvz"]},"model/x3d+xml":{"source":"iana","compressible":true,"extensions":["x3d","x3dz"]},"model/x3d-vrml":{"source":"iana","extensions":["x3dv"]},"multipart/alternative":{"source":"iana","compressible":false},"multipart/appledouble":{"source":"iana"},"multipart/byteranges":{"source":"iana"},"multipart/digest":{"source":"iana"},"multipart/encrypted":{"source":"iana","compressible":false},"multipart/form-data":{"source":"iana","compressible":false},"multipart/header-set":{"source":"iana"},"multipart/mixed":{"source":"iana"},"multipart/multilingual":{"source":"iana"},"multipart/parallel":{"source":"iana"},"multipart/related":{"source":"iana","compressible":false},"multipart/report":{"source":"iana"},"multipart/signed":{"source":"iana","compressible":false},"multipart/vnd.bint.med-plus":{"source":"iana"},"multipart/voice-message":{"source":"iana"},"multipart/x-mixed-replace":{"source":"iana"},"text/1d-interleaved-parityfec":{"source":"iana"},"text/cache-manifest":{"source":"iana","compressible":true,"extensions":["appcache","manifest"]},"text/calendar":{"source":"iana","extensions":["ics","ifb"]},"text/calender":{"compressible":true},"text/cmd":{"compressible":true},"text/coffeescript":{"extensions":["coffee","litcoffee"]},"text/cql":{"source":"iana"},"text/cql-expression":{"source":"iana"},"text/cql-identifier":{"source":"iana"},"text/css":{"source":"iana","charset":"UTF-8","compressible":true,"extensions":["css"]},"text/csv":{"source":"iana","compressible":true,"extensions":["csv"]},"text/csv-schema":{"source":"iana"},"text/directory":{"source":"iana"},"text/dns":{"source":"iana"},"text/ecmascript":{"source":"iana"},"text/encaprtp":{"source":"iana"},"text/enriched":{"source":"iana"},"text/fhirpath":{"source":"iana"},"text/flexfec":{"source":"iana"},"text/fwdred":{"source":"iana"},"text/gff3":{"source":"iana"},"text/grammar-ref-list":{"source":"iana"},"text/html":{"source":"iana","compressible":true,"extensions":["html","htm","shtml"]},"text/jade":{"extensions":["jade"]},"text/javascript":{"source":"iana","compressible":true},"text/jcr-cnd":{"source":"iana"},"text/jsx":{"compressible":true,"extensions":["jsx"]},"text/less":{"compressible":true,"extensions":["less"]},"text/markdown":{"source":"iana","compressible":true,"extensions":["markdown","md"]},"text/mathml":{"source":"nginx","extensions":["mml"]},"text/mdx":{"compressible":true,"extensions":["mdx"]},"text/mizar":{"source":"iana"},"text/n3":{"source":"iana","charset":"UTF-8","compressible":true,"extensions":["n3"]},"text/parameters":{"source":"iana","charset":"UTF-8"},"text/parityfec":{"source":"iana"},"text/plain":{"source":"iana","compressible":true,"extensions":["txt","text","conf","def","list","log","in","ini"]},"text/provenance-notation":{"source":"iana","charset":"UTF-8"},"text/prs.fallenstein.rst":{"source":"iana"},"text/prs.lines.tag":{"source":"iana","extensions":["dsc"]},"text/prs.prop.logic":{"source":"iana"},"text/raptorfec":{"source":"iana"},"text/red":{"source":"iana"},"text/rfc822-headers":{"source":"iana"},"text/richtext":{"source":"iana","compressible":true,"extensions":["rtx"]},"text/rtf":{"source":"iana","compressible":true,"extensions":["rtf"]},"text/rtp-enc-aescm128":{"source":"iana"},"text/rtploopback":{"source":"iana"},"text/rtx":{"source":"iana"},"text/sgml":{"source":"iana","extensions":["sgml","sgm"]},"text/shaclc":{"source":"iana"},"text/shex":{"source":"iana","extensions":["shex"]},"text/slim":{"extensions":["slim","slm"]},"text/spdx":{"source":"iana","extensions":["spdx"]},"text/strings":{"source":"iana"},"text/stylus":{"extensions":["stylus","styl"]},"text/t140":{"source":"iana"},"text/tab-separated-values":{"source":"iana","compressible":true,"extensions":["tsv"]},"text/troff":{"source":"iana","extensions":["t","tr","roff","man","me","ms"]},"text/turtle":{"source":"iana","charset":"UTF-8","extensions":["ttl"]},"text/ulpfec":{"source":"iana"},"text/uri-list":{"source":"iana","compressible":true,"extensions":["uri","uris","urls"]},"text/vcard":{"source":"iana","compressible":true,"extensions":["vcard"]},"text/vnd.a":{"source":"iana"},"text/vnd.abc":{"source":"iana"},"text/vnd.ascii-art":{"source":"iana"},"text/vnd.curl":{"source":"iana","extensions":["curl"]},"text/vnd.curl.dcurl":{"source":"apache","extensions":["dcurl"]},"text/vnd.curl.mcurl":{"source":"apache","extensions":["mcurl"]},"text/vnd.curl.scurl":{"source":"apache","extensions":["scurl"]},"text/vnd.debian.copyright":{"source":"iana","charset":"UTF-8"},"text/vnd.dmclientscript":{"source":"iana"},"text/vnd.dvb.subtitle":{"source":"iana","extensions":["sub"]},"text/vnd.esmertec.theme-descriptor":{"source":"iana","charset":"UTF-8"},"text/vnd.ficlab.flt":{"source":"iana"},"text/vnd.fly":{"source":"iana","extensions":["fly"]},"text/vnd.fmi.flexstor":{"source":"iana","extensions":["flx"]},"text/vnd.gml":{"source":"iana"},"text/vnd.graphviz":{"source":"iana","extensions":["gv"]},"text/vnd.hans":{"source":"iana"},"text/vnd.hgl":{"source":"iana"},"text/vnd.in3d.3dml":{"source":"iana","extensions":["3dml"]},"text/vnd.in3d.spot":{"source":"iana","extensions":["spot"]},"text/vnd.iptc.newsml":{"source":"iana"},"text/vnd.iptc.nitf":{"source":"iana"},"text/vnd.latex-z":{"source":"iana"},"text/vnd.motorola.reflex":{"source":"iana"},"text/vnd.ms-mediapackage":{"source":"iana"},"text/vnd.net2phone.commcenter.command":{"source":"iana"},"text/vnd.radisys.msml-basic-layout":{"source":"iana"},"text/vnd.senx.warpscript":{"source":"iana"},"text/vnd.si.uricatalogue":{"source":"iana"},"text/vnd.sosi":{"source":"iana"},"text/vnd.sun.j2me.app-descriptor":{"source":"iana","charset":"UTF-8","extensions":["jad"]},"text/vnd.trolltech.linguist":{"source":"iana","charset":"UTF-8"},"text/vnd.wap.si":{"source":"iana"},"text/vnd.wap.sl":{"source":"iana"},"text/vnd.wap.wml":{"source":"iana","extensions":["wml"]},"text/vnd.wap.wmlscript":{"source":"iana","extensions":["wmls"]},"text/vtt":{"source":"iana","charset":"UTF-8","compressible":true,"extensions":["vtt"]},"text/x-asm":{"source":"apache","extensions":["s","asm"]},"text/x-c":{"source":"apache","extensions":["c","cc","cxx","cpp","h","hh","dic"]},"text/x-component":{"source":"nginx","extensions":["htc"]},"text/x-fortran":{"source":"apache","extensions":["f","for","f77","f90"]},"text/x-gwt-rpc":{"compressible":true},"text/x-handlebars-template":{"extensions":["hbs"]},"text/x-java-source":{"source":"apache","extensions":["java"]},"text/x-jquery-tmpl":{"compressible":true},"text/x-lua":{"extensions":["lua"]},"text/x-markdown":{"compressible":true,"extensions":["mkd"]},"text/x-nfo":{"source":"apache","extensions":["nfo"]},"text/x-opml":{"source":"apache","extensions":["opml"]},"text/x-org":{"compressible":true,"extensions":["org"]},"text/x-pascal":{"source":"apache","extensions":["p","pas"]},"text/x-processing":{"compressible":true,"extensions":["pde"]},"text/x-sass":{"extensions":["sass"]},"text/x-scss":{"extensions":["scss"]},"text/x-setext":{"source":"apache","extensions":["etx"]},"text/x-sfv":{"source":"apache","extensions":["sfv"]},"text/x-suse-ymp":{"compressible":true,"extensions":["ymp"]},"text/x-uuencode":{"source":"apache","extensions":["uu"]},"text/x-vcalendar":{"source":"apache","extensions":["vcs"]},"text/x-vcard":{"source":"apache","extensions":["vcf"]},"text/xml":{"source":"iana","compressible":true,"extensions":["xml"]},"text/xml-external-parsed-entity":{"source":"iana"},"text/yaml":{"compressible":true,"extensions":["yaml","yml"]},"video/1d-interleaved-parityfec":{"source":"iana"},"video/3gpp":{"source":"iana","extensions":["3gp","3gpp"]},"video/3gpp-tt":{"source":"iana"},"video/3gpp2":{"source":"iana","extensions":["3g2"]},"video/av1":{"source":"iana"},"video/bmpeg":{"source":"iana"},"video/bt656":{"source":"iana"},"video/celb":{"source":"iana"},"video/dv":{"source":"iana"},"video/encaprtp":{"source":"iana"},"video/ffv1":{"source":"iana"},"video/flexfec":{"source":"iana"},"video/h261":{"source":"iana","extensions":["h261"]},"video/h263":{"source":"iana","extensions":["h263"]},"video/h263-1998":{"source":"iana"},"video/h263-2000":{"source":"iana"},"video/h264":{"source":"iana","extensions":["h264"]},"video/h264-rcdo":{"source":"iana"},"video/h264-svc":{"source":"iana"},"video/h265":{"source":"iana"},"video/iso.segment":{"source":"iana","extensions":["m4s"]},"video/jpeg":{"source":"iana","extensions":["jpgv"]},"video/jpeg2000":{"source":"iana"},"video/jpm":{"source":"apache","extensions":["jpm","jpgm"]},"video/jxsv":{"source":"iana"},"video/mj2":{"source":"iana","extensions":["mj2","mjp2"]},"video/mp1s":{"source":"iana"},"video/mp2p":{"source":"iana"},"video/mp2t":{"source":"iana","extensions":["ts"]},"video/mp4":{"source":"iana","compressible":false,"extensions":["mp4","mp4v","mpg4"]},"video/mp4v-es":{"source":"iana"},"video/mpeg":{"source":"iana","compressible":false,"extensions":["mpeg","mpg","mpe","m1v","m2v"]},"video/mpeg4-generic":{"source":"iana"},"video/mpv":{"source":"iana"},"video/nv":{"source":"iana"},"video/ogg":{"source":"iana","compressible":false,"extensions":["ogv"]},"video/parityfec":{"source":"iana"},"video/pointer":{"source":"iana"},"video/quicktime":{"source":"iana","compressible":false,"extensions":["qt","mov"]},"video/raptorfec":{"source":"iana"},"video/raw":{"source":"iana"},"video/rtp-enc-aescm128":{"source":"iana"},"video/rtploopback":{"source":"iana"},"video/rtx":{"source":"iana"},"video/scip":{"source":"iana"},"video/smpte291":{"source":"iana"},"video/smpte292m":{"source":"iana"},"video/ulpfec":{"source":"iana"},"video/vc1":{"source":"iana"},"video/vc2":{"source":"iana"},"video/vnd.cctv":{"source":"iana"},"video/vnd.dece.hd":{"source":"iana","extensions":["uvh","uvvh"]},"video/vnd.dece.mobile":{"source":"iana","extensions":["uvm","uvvm"]},"video/vnd.dece.mp4":{"source":"iana"},"video/vnd.dece.pd":{"source":"iana","extensions":["uvp","uvvp"]},"video/vnd.dece.sd":{"source":"iana","extensions":["uvs","uvvs"]},"video/vnd.dece.video":{"source":"iana","extensions":["uvv","uvvv"]},"video/vnd.directv.mpeg":{"source":"iana"},"video/vnd.directv.mpeg-tts":{"source":"iana"},"video/vnd.dlna.mpeg-tts":{"source":"iana"},"video/vnd.dvb.file":{"source":"iana","extensions":["dvb"]},"video/vnd.fvt":{"source":"iana","extensions":["fvt"]},"video/vnd.hns.video":{"source":"iana"},"video/vnd.iptvforum.1dparityfec-1010":{"source":"iana"},"video/vnd.iptvforum.1dparityfec-2005":{"source":"iana"},"video/vnd.iptvforum.2dparityfec-1010":{"source":"iana"},"video/vnd.iptvforum.2dparityfec-2005":{"source":"iana"},"video/vnd.iptvforum.ttsavc":{"source":"iana"},"video/vnd.iptvforum.ttsmpeg2":{"source":"iana"},"video/vnd.motorola.video":{"source":"iana"},"video/vnd.motorola.videop":{"source":"iana"},"video/vnd.mpegurl":{"source":"iana","extensions":["mxu","m4u"]},"video/vnd.ms-playready.media.pyv":{"source":"iana","extensions":["pyv"]},"video/vnd.nokia.interleaved-multimedia":{"source":"iana"},"video/vnd.nokia.mp4vr":{"source":"iana"},"video/vnd.nokia.videovoip":{"source":"iana"},"video/vnd.objectvideo":{"source":"iana"},"video/vnd.radgamettools.bink":{"source":"iana"},"video/vnd.radgamettools.smacker":{"source":"iana"},"video/vnd.sealed.mpeg1":{"source":"iana"},"video/vnd.sealed.mpeg4":{"source":"iana"},"video/vnd.sealed.swf":{"source":"iana"},"video/vnd.sealedmedia.softseal.mov":{"source":"iana"},"video/vnd.uvvu.mp4":{"source":"iana","extensions":["uvu","uvvu"]},"video/vnd.vivo":{"source":"iana","extensions":["viv"]},"video/vnd.youtube.yt":{"source":"iana"},"video/vp8":{"source":"iana"},"video/vp9":{"source":"iana"},"video/webm":{"source":"apache","compressible":false,"extensions":["webm"]},"video/x-f4v":{"source":"apache","extensions":["f4v"]},"video/x-fli":{"source":"apache","extensions":["fli"]},"video/x-flv":{"source":"apache","compressible":false,"extensions":["flv"]},"video/x-m4v":{"source":"apache","extensions":["m4v"]},"video/x-matroska":{"source":"apache","compressible":false,"extensions":["mkv","mk3d","mks"]},"video/x-mng":{"source":"apache","extensions":["mng"]},"video/x-ms-asf":{"source":"apache","extensions":["asf","asx"]},"video/x-ms-vob":{"source":"apache","extensions":["vob"]},"video/x-ms-wm":{"source":"apache","extensions":["wm"]},"video/x-ms-wmv":{"source":"apache","compressible":false,"extensions":["wmv"]},"video/x-ms-wmx":{"source":"apache","extensions":["wmx"]},"video/x-ms-wvx":{"source":"apache","extensions":["wvx"]},"video/x-msvideo":{"source":"apache","extensions":["avi"]},"video/x-sgi-movie":{"source":"apache","extensions":["movie"]},"video/x-smv":{"source":"apache","extensions":["smv"]},"x-conference/x-cooltalk":{"source":"apache","extensions":["ice"]},"x-shader/x-fragment":{"compressible":true},"x-shader/x-vertex":{"compressible":true}}');
 
 /***/ })
 
@@ -6722,10 +14033,122 @@ module.exports = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("zlib");
 /******/ 	return module.exports;
 /******/ }
 /******/ 
+/******/ // expose the modules object (__webpack_modules__)
+/******/ __nccwpck_require__.m = __webpack_modules__;
+/******/ 
 /************************************************************************/
+/******/ /* webpack/runtime/define property getters */
+/******/ (() => {
+/******/ 	// define getter functions for harmony exports
+/******/ 	__nccwpck_require__.d = (exports, definition) => {
+/******/ 		for(var key in definition) {
+/******/ 			if(__nccwpck_require__.o(definition, key) && !__nccwpck_require__.o(exports, key)) {
+/******/ 				Object.defineProperty(exports, key, { enumerable: true, get: definition[key] });
+/******/ 			}
+/******/ 		}
+/******/ 	};
+/******/ })();
+/******/ 
+/******/ /* webpack/runtime/ensure chunk */
+/******/ (() => {
+/******/ 	__nccwpck_require__.f = {};
+/******/ 	// This file contains only the entry chunk.
+/******/ 	// The chunk loading function for additional chunks
+/******/ 	__nccwpck_require__.e = (chunkId) => {
+/******/ 		return Promise.all(Object.keys(__nccwpck_require__.f).reduce((promises, key) => {
+/******/ 			__nccwpck_require__.f[key](chunkId, promises);
+/******/ 			return promises;
+/******/ 		}, []));
+/******/ 	};
+/******/ })();
+/******/ 
+/******/ /* webpack/runtime/get javascript chunk filename */
+/******/ (() => {
+/******/ 	// This function allow to reference async chunks
+/******/ 	__nccwpck_require__.u = (chunkId) => {
+/******/ 		// return url for filenames based on template
+/******/ 		return "" + chunkId + ".index.js";
+/******/ 	};
+/******/ })();
+/******/ 
+/******/ /* webpack/runtime/hasOwnProperty shorthand */
+/******/ (() => {
+/******/ 	__nccwpck_require__.o = (obj, prop) => (Object.prototype.hasOwnProperty.call(obj, prop))
+/******/ })();
+/******/ 
+/******/ /* webpack/runtime/make namespace object */
+/******/ (() => {
+/******/ 	// define __esModule on exports
+/******/ 	__nccwpck_require__.r = (exports) => {
+/******/ 		if(typeof Symbol !== 'undefined' && Symbol.toStringTag) {
+/******/ 			Object.defineProperty(exports, Symbol.toStringTag, { value: 'Module' });
+/******/ 		}
+/******/ 		Object.defineProperty(exports, '__esModule', { value: true });
+/******/ 	};
+/******/ })();
+/******/ 
 /******/ /* webpack/runtime/compat */
 /******/ 
 /******/ if (typeof __nccwpck_require__ !== 'undefined') __nccwpck_require__.ab = new URL('.', import.meta.url).pathname.slice(import.meta.url.match(/^file:\/\/\/\w:/) ? 1 : 0, -1) + "/";
+/******/ 
+/******/ /* webpack/runtime/import chunk loading */
+/******/ (() => {
+/******/ 	// no baseURI
+/******/ 	
+/******/ 	// object to store loaded and loading chunks
+/******/ 	// undefined = chunk not loaded, null = chunk preloaded/prefetched
+/******/ 	// [resolve, reject, Promise] = chunk loading, 0 = chunk loaded
+/******/ 	var installedChunks = {
+/******/ 		179: 0
+/******/ 	};
+/******/ 	
+/******/ 	var installChunk = (data) => {
+/******/ 		var {ids, modules, runtime} = data;
+/******/ 		// add "modules" to the modules object,
+/******/ 		// then flag all "ids" as loaded and fire callback
+/******/ 		var moduleId, chunkId, i = 0;
+/******/ 		for(moduleId in modules) {
+/******/ 			if(__nccwpck_require__.o(modules, moduleId)) {
+/******/ 				__nccwpck_require__.m[moduleId] = modules[moduleId];
+/******/ 			}
+/******/ 		}
+/******/ 		if(runtime) runtime(__nccwpck_require__);
+/******/ 		for(;i < ids.length; i++) {
+/******/ 			chunkId = ids[i];
+/******/ 			if(__nccwpck_require__.o(installedChunks, chunkId) && installedChunks[chunkId]) {
+/******/ 				installedChunks[chunkId][0]();
+/******/ 			}
+/******/ 			installedChunks[ids[i]] = 0;
+/******/ 		}
+/******/ 	
+/******/ 	}
+/******/ 	
+/******/ 	__nccwpck_require__.f.j = (chunkId, promises) => {
+/******/ 			// import() chunk loading for javascript
+/******/ 			var installedChunkData = __nccwpck_require__.o(installedChunks, chunkId) ? installedChunks[chunkId] : undefined;
+/******/ 			if(installedChunkData !== 0) { // 0 means "already installed".
+/******/ 	
+/******/ 				// a Promise means "currently loading".
+/******/ 				if(installedChunkData) {
+/******/ 					promises.push(installedChunkData[1]);
+/******/ 				} else {
+/******/ 					if(true) { // all chunks have JS
+/******/ 						// setup Promise in chunk cache
+/******/ 						var promise = import("./" + __nccwpck_require__.u(chunkId)).then(installChunk, (e) => {
+/******/ 							if(installedChunks[chunkId] !== 0) installedChunks[chunkId] = undefined;
+/******/ 							throw e;
+/******/ 						});
+/******/ 						var promise = Promise.race([promise, new Promise((resolve) => (installedChunkData = installedChunks[chunkId] = [resolve]))])
+/******/ 						promises.push(installedChunkData[1] = promise);
+/******/ 					} else installedChunks[chunkId] = 0;
+/******/ 				}
+/******/ 			}
+/******/ 	};
+/******/ 	
+/******/ 	// no external install chunk
+/******/ 	
+/******/ 	// no on chunks loaded
+/******/ })();
 /******/ 
 /************************************************************************/
 var __webpack_exports__ = {};
@@ -6734,5790 +14157,2154 @@ var __webpack_exports__ = {};
 
 // EXTERNAL MODULE: ./node_modules/@actions/core/lib/core.js
 var core = __nccwpck_require__(2186);
-;// CONCATENATED MODULE: ./node_modules/@sindresorhus/is/dist/index.js
-const typedArrayTypeNames = [
-    'Int8Array',
-    'Uint8Array',
-    'Uint8ClampedArray',
-    'Int16Array',
-    'Uint16Array',
-    'Int32Array',
-    'Uint32Array',
-    'Float32Array',
-    'Float64Array',
-    'BigInt64Array',
-    'BigUint64Array',
-];
-function isTypedArrayName(name) {
-    return typedArrayTypeNames.includes(name);
-}
-const objectTypeNames = [
-    'Function',
-    'Generator',
-    'AsyncGenerator',
-    'GeneratorFunction',
-    'AsyncGeneratorFunction',
-    'AsyncFunction',
-    'Observable',
-    'Array',
-    'Buffer',
-    'Blob',
-    'Object',
-    'RegExp',
-    'Date',
-    'Error',
-    'Map',
-    'Set',
-    'WeakMap',
-    'WeakSet',
-    'WeakRef',
-    'ArrayBuffer',
-    'SharedArrayBuffer',
-    'DataView',
-    'Promise',
-    'URL',
-    'FormData',
-    'URLSearchParams',
-    'HTMLElement',
-    'NaN',
-    ...typedArrayTypeNames,
-];
-function isObjectTypeName(name) {
-    return objectTypeNames.includes(name);
-}
-const primitiveTypeNames = [
-    'null',
-    'undefined',
-    'string',
-    'number',
-    'bigint',
-    'boolean',
-    'symbol',
-];
-function isPrimitiveTypeName(name) {
-    return primitiveTypeNames.includes(name);
-}
-// eslint-disable-next-line @typescript-eslint/ban-types
-function isOfType(type) {
-    return (value) => typeof value === type;
-}
-const { toString: dist_toString } = Object.prototype;
-const getObjectType = (value) => {
-    const objectTypeName = dist_toString.call(value).slice(8, -1);
-    if (/HTML\w+Element/.test(objectTypeName) && is.domElement(value)) {
-        return 'HTMLElement';
-    }
-    if (isObjectTypeName(objectTypeName)) {
-        return objectTypeName;
-    }
-    return undefined;
-};
-const isObjectOfType = (type) => (value) => getObjectType(value) === type;
-function is(value) {
-    if (value === null) {
-        return 'null';
-    }
-    switch (typeof value) {
-        case 'undefined':
-            return 'undefined';
-        case 'string':
-            return 'string';
-        case 'number':
-            return Number.isNaN(value) ? 'NaN' : 'number';
-        case 'boolean':
-            return 'boolean';
-        case 'function':
-            return 'Function';
-        case 'bigint':
-            return 'bigint';
-        case 'symbol':
-            return 'symbol';
-        default:
-    }
-    if (is.observable(value)) {
-        return 'Observable';
-    }
-    if (is.array(value)) {
-        return 'Array';
-    }
-    if (is.buffer(value)) {
-        return 'Buffer';
-    }
-    const tagType = getObjectType(value);
-    if (tagType) {
-        return tagType;
-    }
-    if (value instanceof String || value instanceof Boolean || value instanceof Number) {
-        throw new TypeError('Please don\'t use object wrappers for primitive types');
-    }
-    return 'Object';
-}
-is.undefined = isOfType('undefined');
-is.string = isOfType('string');
-const isNumberType = isOfType('number');
-is.number = (value) => isNumberType(value) && !is.nan(value);
-is.bigint = isOfType('bigint');
-// eslint-disable-next-line @typescript-eslint/ban-types
-is.function_ = isOfType('function');
-// eslint-disable-next-line @typescript-eslint/ban-types
-is.null_ = (value) => value === null;
-is.class_ = (value) => is.function_(value) && value.toString().startsWith('class ');
-is.boolean = (value) => value === true || value === false;
-is.symbol = isOfType('symbol');
-is.numericString = (value) => is.string(value) && !is.emptyStringOrWhitespace(value) && !Number.isNaN(Number(value));
-is.array = (value, assertion) => {
-    if (!Array.isArray(value)) {
-        return false;
-    }
-    if (!is.function_(assertion)) {
-        return true;
-    }
-    return value.every(element => assertion(element));
-};
-// eslint-disable-next-line @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-call
-is.buffer = (value) => value?.constructor?.isBuffer?.(value) ?? false;
-is.blob = (value) => isObjectOfType('Blob')(value);
-is.nullOrUndefined = (value) => is.null_(value) || is.undefined(value); // eslint-disable-line @typescript-eslint/ban-types
-is.object = (value) => !is.null_(value) && (typeof value === 'object' || is.function_(value)); // eslint-disable-line @typescript-eslint/ban-types
-is.iterable = (value) => is.function_(value?.[Symbol.iterator]);
-is.asyncIterable = (value) => is.function_(value?.[Symbol.asyncIterator]);
-is.generator = (value) => is.iterable(value) && is.function_(value?.next) && is.function_(value?.throw);
-is.asyncGenerator = (value) => is.asyncIterable(value) && is.function_(value.next) && is.function_(value.throw);
-is.nativePromise = (value) => isObjectOfType('Promise')(value);
-const hasPromiseApi = (value) => is.function_(value?.then)
-    && is.function_(value?.catch);
-is.promise = (value) => is.nativePromise(value) || hasPromiseApi(value);
-is.generatorFunction = isObjectOfType('GeneratorFunction');
-is.asyncGeneratorFunction = (value) => getObjectType(value) === 'AsyncGeneratorFunction';
-is.asyncFunction = (value) => getObjectType(value) === 'AsyncFunction';
-// eslint-disable-next-line no-prototype-builtins, @typescript-eslint/ban-types
-is.boundFunction = (value) => is.function_(value) && !value.hasOwnProperty('prototype');
-is.regExp = isObjectOfType('RegExp');
-is.date = isObjectOfType('Date');
-is.error = isObjectOfType('Error');
-is.map = (value) => isObjectOfType('Map')(value);
-is.set = (value) => isObjectOfType('Set')(value);
-is.weakMap = (value) => isObjectOfType('WeakMap')(value); // eslint-disable-line @typescript-eslint/ban-types
-is.weakSet = (value) => isObjectOfType('WeakSet')(value); // eslint-disable-line @typescript-eslint/ban-types
-is.weakRef = (value) => isObjectOfType('WeakRef')(value); // eslint-disable-line @typescript-eslint/ban-types
-is.int8Array = isObjectOfType('Int8Array');
-is.uint8Array = isObjectOfType('Uint8Array');
-is.uint8ClampedArray = isObjectOfType('Uint8ClampedArray');
-is.int16Array = isObjectOfType('Int16Array');
-is.uint16Array = isObjectOfType('Uint16Array');
-is.int32Array = isObjectOfType('Int32Array');
-is.uint32Array = isObjectOfType('Uint32Array');
-is.float32Array = isObjectOfType('Float32Array');
-is.float64Array = isObjectOfType('Float64Array');
-is.bigInt64Array = isObjectOfType('BigInt64Array');
-is.bigUint64Array = isObjectOfType('BigUint64Array');
-is.arrayBuffer = isObjectOfType('ArrayBuffer');
-is.sharedArrayBuffer = isObjectOfType('SharedArrayBuffer');
-is.dataView = isObjectOfType('DataView');
-is.enumCase = (value, targetEnum) => Object.values(targetEnum).includes(value);
-is.directInstanceOf = (instance, class_) => Object.getPrototypeOf(instance) === class_.prototype;
-is.urlInstance = (value) => isObjectOfType('URL')(value);
-is.urlString = (value) => {
-    if (!is.string(value)) {
-        return false;
-    }
-    try {
-        new URL(value); // eslint-disable-line no-new
-        return true;
-    }
-    catch {
-        return false;
-    }
-};
-// Example: `is.truthy = (value: unknown): value is (not false | not 0 | not '' | not undefined | not null) => Boolean(value);`
-is.truthy = (value) => Boolean(value); // eslint-disable-line unicorn/prefer-native-coercion-functions
-// Example: `is.falsy = (value: unknown): value is (not true | 0 | '' | undefined | null) => Boolean(value);`
-is.falsy = (value) => !value;
-is.nan = (value) => Number.isNaN(value);
-is.primitive = (value) => is.null_(value) || isPrimitiveTypeName(typeof value);
-is.integer = (value) => Number.isInteger(value);
-is.safeInteger = (value) => Number.isSafeInteger(value);
-is.plainObject = (value) => {
-    // From: https://github.com/sindresorhus/is-plain-obj/blob/main/index.js
-    if (typeof value !== 'object' || value === null) {
-        return false;
-    }
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-    const prototype = Object.getPrototypeOf(value);
-    return (prototype === null || prototype === Object.prototype || Object.getPrototypeOf(prototype) === null) && !(Symbol.toStringTag in value) && !(Symbol.iterator in value);
-};
-is.typedArray = (value) => isTypedArrayName(getObjectType(value));
-const isValidLength = (value) => is.safeInteger(value) && value >= 0;
-is.arrayLike = (value) => !is.nullOrUndefined(value) && !is.function_(value) && isValidLength(value.length);
-is.inRange = (value, range) => {
-    if (is.number(range)) {
-        return value >= Math.min(0, range) && value <= Math.max(range, 0);
-    }
-    if (is.array(range) && range.length === 2) {
-        return value >= Math.min(...range) && value <= Math.max(...range);
-    }
-    throw new TypeError(`Invalid range: ${JSON.stringify(range)}`);
-};
-// eslint-disable-next-line @typescript-eslint/naming-convention
-const NODE_TYPE_ELEMENT = 1;
-// eslint-disable-next-line @typescript-eslint/naming-convention
-const DOM_PROPERTIES_TO_CHECK = [
-    'innerHTML',
-    'ownerDocument',
-    'style',
-    'attributes',
-    'nodeValue',
-];
-is.domElement = (value) => is.object(value)
-    && value.nodeType === NODE_TYPE_ELEMENT
-    && is.string(value.nodeName)
-    && !is.plainObject(value)
-    && DOM_PROPERTIES_TO_CHECK.every(property => property in value);
-is.observable = (value) => {
-    if (!value) {
-        return false;
-    }
-    // eslint-disable-next-line no-use-extend-native/no-use-extend-native, @typescript-eslint/no-unsafe-call
-    if (value === value[Symbol.observable]?.()) {
-        return true;
-    }
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-call
-    if (value === value['@@observable']?.()) {
-        return true;
-    }
-    return false;
-};
-is.nodeStream = (value) => is.object(value) && is.function_(value.pipe) && !is.observable(value);
-is.infinite = (value) => value === Number.POSITIVE_INFINITY || value === Number.NEGATIVE_INFINITY;
-const isAbsoluteMod2 = (remainder) => (value) => is.integer(value) && Math.abs(value % 2) === remainder;
-is.evenInteger = isAbsoluteMod2(0);
-is.oddInteger = isAbsoluteMod2(1);
-is.emptyArray = (value) => is.array(value) && value.length === 0;
-is.nonEmptyArray = (value) => is.array(value) && value.length > 0;
-is.emptyString = (value) => is.string(value) && value.length === 0;
-const isWhiteSpaceString = (value) => is.string(value) && !/\S/.test(value);
-is.emptyStringOrWhitespace = (value) => is.emptyString(value) || isWhiteSpaceString(value);
-// TODO: Use `not ''` when the `not` operator is available.
-is.nonEmptyString = (value) => is.string(value) && value.length > 0;
-// TODO: Use `not ''` when the `not` operator is available.
-is.nonEmptyStringAndNotWhitespace = (value) => is.string(value) && !is.emptyStringOrWhitespace(value);
-// eslint-disable-next-line unicorn/no-array-callback-reference
-is.emptyObject = (value) => is.object(value) && !is.map(value) && !is.set(value) && Object.keys(value).length === 0;
-// TODO: Use `not` operator here to remove `Map` and `Set` from type guard:
-// - https://github.com/Microsoft/TypeScript/pull/29317
-// eslint-disable-next-line unicorn/no-array-callback-reference
-is.nonEmptyObject = (value) => is.object(value) && !is.map(value) && !is.set(value) && Object.keys(value).length > 0;
-is.emptySet = (value) => is.set(value) && value.size === 0;
-is.nonEmptySet = (value) => is.set(value) && value.size > 0;
-// eslint-disable-next-line unicorn/no-array-callback-reference
-is.emptyMap = (value) => is.map(value) && value.size === 0;
-// eslint-disable-next-line unicorn/no-array-callback-reference
-is.nonEmptyMap = (value) => is.map(value) && value.size > 0;
-// `PropertyKey` is any value that can be used as an object key (string, number, or symbol)
-is.propertyKey = (value) => is.any([is.string, is.number, is.symbol], value);
-is.formData = (value) => isObjectOfType('FormData')(value);
-is.urlSearchParams = (value) => isObjectOfType('URLSearchParams')(value);
-const predicateOnArray = (method, predicate, values) => {
-    if (!is.function_(predicate)) {
-        throw new TypeError(`Invalid predicate: ${JSON.stringify(predicate)}`);
-    }
-    if (values.length === 0) {
-        throw new TypeError('Invalid number of values');
-    }
-    return method.call(values, predicate);
-};
-is.any = (predicate, ...values) => {
-    const predicates = is.array(predicate) ? predicate : [predicate];
-    return predicates.some(singlePredicate => predicateOnArray(Array.prototype.some, singlePredicate, values));
-};
-is.all = (predicate, ...values) => predicateOnArray(Array.prototype.every, predicate, values);
-const assertType = (condition, description, value, options = {}) => {
-    if (!condition) {
-        const { multipleValues } = options;
-        const valuesMessage = multipleValues
-            ? `received values of types ${[
-                ...new Set(value.map(singleValue => `\`${is(singleValue)}\``)),
-            ].join(', ')}`
-            : `received value of type \`${is(value)}\``;
-        throw new TypeError(`Expected value which is \`${description}\`, ${valuesMessage}.`);
-    }
-};
-/* eslint-disable @typescript-eslint/no-confusing-void-expression */
-const assert = {
-    // Unknowns.
-    undefined: (value) => assertType(is.undefined(value), 'undefined', value),
-    string: (value) => assertType(is.string(value), 'string', value),
-    number: (value) => assertType(is.number(value), 'number', value),
-    bigint: (value) => assertType(is.bigint(value), 'bigint', value),
-    // eslint-disable-next-line @typescript-eslint/ban-types
-    function_: (value) => assertType(is.function_(value), 'Function', value),
-    null_: (value) => assertType(is.null_(value), 'null', value),
-    class_: (value) => assertType(is.class_(value), "Class" /* AssertionTypeDescription.class_ */, value),
-    boolean: (value) => assertType(is.boolean(value), 'boolean', value),
-    symbol: (value) => assertType(is.symbol(value), 'symbol', value),
-    numericString: (value) => assertType(is.numericString(value), "string with a number" /* AssertionTypeDescription.numericString */, value),
-    array: (value, assertion) => {
-        const assert = assertType;
-        assert(is.array(value), 'Array', value);
-        if (assertion) {
-            // eslint-disable-next-line unicorn/no-array-for-each, unicorn/no-array-callback-reference
-            value.forEach(assertion);
-        }
-    },
-    buffer: (value) => assertType(is.buffer(value), 'Buffer', value),
-    blob: (value) => assertType(is.blob(value), 'Blob', value),
-    nullOrUndefined: (value) => assertType(is.nullOrUndefined(value), "null or undefined" /* AssertionTypeDescription.nullOrUndefined */, value),
-    object: (value) => assertType(is.object(value), 'Object', value),
-    iterable: (value) => assertType(is.iterable(value), "Iterable" /* AssertionTypeDescription.iterable */, value),
-    asyncIterable: (value) => assertType(is.asyncIterable(value), "AsyncIterable" /* AssertionTypeDescription.asyncIterable */, value),
-    generator: (value) => assertType(is.generator(value), 'Generator', value),
-    asyncGenerator: (value) => assertType(is.asyncGenerator(value), 'AsyncGenerator', value),
-    nativePromise: (value) => assertType(is.nativePromise(value), "native Promise" /* AssertionTypeDescription.nativePromise */, value),
-    promise: (value) => assertType(is.promise(value), 'Promise', value),
-    generatorFunction: (value) => assertType(is.generatorFunction(value), 'GeneratorFunction', value),
-    asyncGeneratorFunction: (value) => assertType(is.asyncGeneratorFunction(value), 'AsyncGeneratorFunction', value),
-    // eslint-disable-next-line @typescript-eslint/ban-types
-    asyncFunction: (value) => assertType(is.asyncFunction(value), 'AsyncFunction', value),
-    // eslint-disable-next-line @typescript-eslint/ban-types
-    boundFunction: (value) => assertType(is.boundFunction(value), 'Function', value),
-    regExp: (value) => assertType(is.regExp(value), 'RegExp', value),
-    date: (value) => assertType(is.date(value), 'Date', value),
-    error: (value) => assertType(is.error(value), 'Error', value),
-    map: (value) => assertType(is.map(value), 'Map', value),
-    set: (value) => assertType(is.set(value), 'Set', value),
-    weakMap: (value) => assertType(is.weakMap(value), 'WeakMap', value),
-    weakSet: (value) => assertType(is.weakSet(value), 'WeakSet', value),
-    weakRef: (value) => assertType(is.weakRef(value), 'WeakRef', value),
-    int8Array: (value) => assertType(is.int8Array(value), 'Int8Array', value),
-    uint8Array: (value) => assertType(is.uint8Array(value), 'Uint8Array', value),
-    uint8ClampedArray: (value) => assertType(is.uint8ClampedArray(value), 'Uint8ClampedArray', value),
-    int16Array: (value) => assertType(is.int16Array(value), 'Int16Array', value),
-    uint16Array: (value) => assertType(is.uint16Array(value), 'Uint16Array', value),
-    int32Array: (value) => assertType(is.int32Array(value), 'Int32Array', value),
-    uint32Array: (value) => assertType(is.uint32Array(value), 'Uint32Array', value),
-    float32Array: (value) => assertType(is.float32Array(value), 'Float32Array', value),
-    float64Array: (value) => assertType(is.float64Array(value), 'Float64Array', value),
-    bigInt64Array: (value) => assertType(is.bigInt64Array(value), 'BigInt64Array', value),
-    bigUint64Array: (value) => assertType(is.bigUint64Array(value), 'BigUint64Array', value),
-    arrayBuffer: (value) => assertType(is.arrayBuffer(value), 'ArrayBuffer', value),
-    sharedArrayBuffer: (value) => assertType(is.sharedArrayBuffer(value), 'SharedArrayBuffer', value),
-    dataView: (value) => assertType(is.dataView(value), 'DataView', value),
-    enumCase: (value, targetEnum) => assertType(is.enumCase(value, targetEnum), 'EnumCase', value),
-    urlInstance: (value) => assertType(is.urlInstance(value), 'URL', value),
-    urlString: (value) => assertType(is.urlString(value), "string with a URL" /* AssertionTypeDescription.urlString */, value),
-    truthy: (value) => assertType(is.truthy(value), "truthy" /* AssertionTypeDescription.truthy */, value),
-    falsy: (value) => assertType(is.falsy(value), "falsy" /* AssertionTypeDescription.falsy */, value),
-    nan: (value) => assertType(is.nan(value), "NaN" /* AssertionTypeDescription.nan */, value),
-    primitive: (value) => assertType(is.primitive(value), "primitive" /* AssertionTypeDescription.primitive */, value),
-    integer: (value) => assertType(is.integer(value), "integer" /* AssertionTypeDescription.integer */, value),
-    safeInteger: (value) => assertType(is.safeInteger(value), "integer" /* AssertionTypeDescription.safeInteger */, value),
-    plainObject: (value) => assertType(is.plainObject(value), "plain object" /* AssertionTypeDescription.plainObject */, value),
-    typedArray: (value) => assertType(is.typedArray(value), "TypedArray" /* AssertionTypeDescription.typedArray */, value),
-    arrayLike: (value) => assertType(is.arrayLike(value), "array-like" /* AssertionTypeDescription.arrayLike */, value),
-    domElement: (value) => assertType(is.domElement(value), "HTMLElement" /* AssertionTypeDescription.domElement */, value),
-    observable: (value) => assertType(is.observable(value), 'Observable', value),
-    nodeStream: (value) => assertType(is.nodeStream(value), "Node.js Stream" /* AssertionTypeDescription.nodeStream */, value),
-    infinite: (value) => assertType(is.infinite(value), "infinite number" /* AssertionTypeDescription.infinite */, value),
-    emptyArray: (value) => assertType(is.emptyArray(value), "empty array" /* AssertionTypeDescription.emptyArray */, value),
-    nonEmptyArray: (value) => assertType(is.nonEmptyArray(value), "non-empty array" /* AssertionTypeDescription.nonEmptyArray */, value),
-    emptyString: (value) => assertType(is.emptyString(value), "empty string" /* AssertionTypeDescription.emptyString */, value),
-    emptyStringOrWhitespace: (value) => assertType(is.emptyStringOrWhitespace(value), "empty string or whitespace" /* AssertionTypeDescription.emptyStringOrWhitespace */, value),
-    nonEmptyString: (value) => assertType(is.nonEmptyString(value), "non-empty string" /* AssertionTypeDescription.nonEmptyString */, value),
-    nonEmptyStringAndNotWhitespace: (value) => assertType(is.nonEmptyStringAndNotWhitespace(value), "non-empty string and not whitespace" /* AssertionTypeDescription.nonEmptyStringAndNotWhitespace */, value),
-    emptyObject: (value) => assertType(is.emptyObject(value), "empty object" /* AssertionTypeDescription.emptyObject */, value),
-    nonEmptyObject: (value) => assertType(is.nonEmptyObject(value), "non-empty object" /* AssertionTypeDescription.nonEmptyObject */, value),
-    emptySet: (value) => assertType(is.emptySet(value), "empty set" /* AssertionTypeDescription.emptySet */, value),
-    nonEmptySet: (value) => assertType(is.nonEmptySet(value), "non-empty set" /* AssertionTypeDescription.nonEmptySet */, value),
-    emptyMap: (value) => assertType(is.emptyMap(value), "empty map" /* AssertionTypeDescription.emptyMap */, value),
-    nonEmptyMap: (value) => assertType(is.nonEmptyMap(value), "non-empty map" /* AssertionTypeDescription.nonEmptyMap */, value),
-    propertyKey: (value) => assertType(is.propertyKey(value), 'PropertyKey', value),
-    formData: (value) => assertType(is.formData(value), 'FormData', value),
-    urlSearchParams: (value) => assertType(is.urlSearchParams(value), 'URLSearchParams', value),
-    // Numbers.
-    evenInteger: (value) => assertType(is.evenInteger(value), "even integer" /* AssertionTypeDescription.evenInteger */, value),
-    oddInteger: (value) => assertType(is.oddInteger(value), "odd integer" /* AssertionTypeDescription.oddInteger */, value),
-    // Two arguments.
-    directInstanceOf: (instance, class_) => assertType(is.directInstanceOf(instance, class_), "T" /* AssertionTypeDescription.directInstanceOf */, instance),
-    inRange: (value, range) => assertType(is.inRange(value, range), "in range" /* AssertionTypeDescription.inRange */, value),
-    // Variadic functions.
-    any: (predicate, ...values) => assertType(is.any(predicate, ...values), "predicate returns truthy for any value" /* AssertionTypeDescription.any */, values, { multipleValues: true }),
-    all: (predicate, ...values) => assertType(is.all(predicate, ...values), "predicate returns truthy for all values" /* AssertionTypeDescription.all */, values, { multipleValues: true }),
-};
-/* eslint-enable @typescript-eslint/no-confusing-void-expression */
-// Some few keywords are reserved, but we'll populate them for Node.js users
-// See https://github.com/Microsoft/TypeScript/issues/2536
-Object.defineProperties(is, {
-    class: {
-        value: is.class_,
-    },
-    function: {
-        value: is.function_,
-    },
-    null: {
-        value: is.null_,
-    },
-});
-Object.defineProperties(assert, {
-    class: {
-        value: assert.class_,
-    },
-    function: {
-        value: assert.function_,
-    },
-    null: {
-        value: assert.null_,
-    },
-});
-/* harmony default export */ const dist = (is);
-
-;// CONCATENATED MODULE: external "node:events"
-const external_node_events_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:events");
-;// CONCATENATED MODULE: ./node_modules/p-cancelable/index.js
-class CancelError extends Error {
-	constructor(reason) {
-		super(reason || 'Promise was canceled');
-		this.name = 'CancelError';
-	}
-
-	get isCanceled() {
-		return true;
-	}
-}
-
-// TODO: Use private class fields when ESLint 8 is out.
-
-class PCancelable {
-	static fn(userFunction) {
-		return (...arguments_) => {
-			return new PCancelable((resolve, reject, onCancel) => {
-				arguments_.push(onCancel);
-				// eslint-disable-next-line promise/prefer-await-to-then
-				userFunction(...arguments_).then(resolve, reject);
-			});
-		};
-	}
-
-	constructor(executor) {
-		this._cancelHandlers = [];
-		this._isPending = true;
-		this._isCanceled = false;
-		this._rejectOnCancel = true;
-
-		this._promise = new Promise((resolve, reject) => {
-			this._reject = reject;
-
-			const onResolve = value => {
-				if (!this._isCanceled || !onCancel.shouldReject) {
-					this._isPending = false;
-					resolve(value);
-				}
-			};
-
-			const onReject = error => {
-				this._isPending = false;
-				reject(error);
-			};
-
-			const onCancel = handler => {
-				if (!this._isPending) {
-					throw new Error('The `onCancel` handler was attached after the promise settled.');
-				}
-
-				this._cancelHandlers.push(handler);
-			};
-
-			Object.defineProperties(onCancel, {
-				shouldReject: {
-					get: () => this._rejectOnCancel,
-					set: boolean => {
-						this._rejectOnCancel = boolean;
-					}
-				}
-			});
-
-			executor(onResolve, onReject, onCancel);
-		});
-	}
-
-	then(onFulfilled, onRejected) {
-		// eslint-disable-next-line promise/prefer-await-to-then
-		return this._promise.then(onFulfilled, onRejected);
-	}
-
-	catch(onRejected) {
-		// eslint-disable-next-line promise/prefer-await-to-then
-		return this._promise.catch(onRejected);
-	}
-
-	finally(onFinally) {
-		// eslint-disable-next-line promise/prefer-await-to-then
-		return this._promise.finally(onFinally);
-	}
-
-	cancel(reason) {
-		if (!this._isPending || this._isCanceled) {
-			return;
-		}
-
-		this._isCanceled = true;
-
-		if (this._cancelHandlers.length > 0) {
-			try {
-				for (const handler of this._cancelHandlers) {
-					handler();
-				}
-			} catch (error) {
-				this._reject(error);
-				return;
-			}
-		}
-
-		if (this._rejectOnCancel) {
-			this._reject(new CancelError(reason));
-		}
-	}
-
-	get isCanceled() {
-		return this._isCanceled;
-	}
-}
-
-Object.setPrototypeOf(PCancelable.prototype, Promise.prototype);
-
-;// CONCATENATED MODULE: ./node_modules/got/dist/source/core/errors.js
-
-// A hacky check to prevent circular references.
-function isRequest(x) {
-    return dist.object(x) && '_onResponse' in x;
-}
-/**
-An error to be thrown when a request fails.
-Contains a `code` property with error class code, like `ECONNREFUSED`.
-*/
-class RequestError extends Error {
-    constructor(message, error, self) {
-        super(message);
-        Object.defineProperty(this, "input", {
-            enumerable: true,
-            configurable: true,
-            writable: true,
-            value: void 0
-        });
-        Object.defineProperty(this, "code", {
-            enumerable: true,
-            configurable: true,
-            writable: true,
-            value: void 0
-        });
-        Object.defineProperty(this, "stack", {
-            enumerable: true,
-            configurable: true,
-            writable: true,
-            value: void 0
-        });
-        Object.defineProperty(this, "response", {
-            enumerable: true,
-            configurable: true,
-            writable: true,
-            value: void 0
-        });
-        Object.defineProperty(this, "request", {
-            enumerable: true,
-            configurable: true,
-            writable: true,
-            value: void 0
-        });
-        Object.defineProperty(this, "timings", {
-            enumerable: true,
-            configurable: true,
-            writable: true,
-            value: void 0
-        });
-        Error.captureStackTrace(this, this.constructor);
-        this.name = 'RequestError';
-        this.code = error.code ?? 'ERR_GOT_REQUEST_ERROR';
-        this.input = error.input;
-        if (isRequest(self)) {
-            Object.defineProperty(this, 'request', {
-                enumerable: false,
-                value: self,
-            });
-            Object.defineProperty(this, 'response', {
-                enumerable: false,
-                value: self.response,
-            });
-            this.options = self.options;
-        }
-        else {
-            this.options = self;
-        }
-        this.timings = this.request?.timings;
-        // Recover the original stacktrace
-        if (dist.string(error.stack) && dist.string(this.stack)) {
-            const indexOfMessage = this.stack.indexOf(this.message) + this.message.length;
-            const thisStackTrace = this.stack.slice(indexOfMessage).split('\n').reverse();
-            const errorStackTrace = error.stack.slice(error.stack.indexOf(error.message) + error.message.length).split('\n').reverse();
-            // Remove duplicated traces
-            while (errorStackTrace.length > 0 && errorStackTrace[0] === thisStackTrace[0]) {
-                thisStackTrace.shift();
-            }
-            this.stack = `${this.stack.slice(0, indexOfMessage)}${thisStackTrace.reverse().join('\n')}${errorStackTrace.reverse().join('\n')}`;
-        }
-    }
-}
-/**
-An error to be thrown when the server redirects you more than ten times.
-Includes a `response` property.
-*/
-class MaxRedirectsError extends RequestError {
-    constructor(request) {
-        super(`Redirected ${request.options.maxRedirects} times. Aborting.`, {}, request);
-        this.name = 'MaxRedirectsError';
-        this.code = 'ERR_TOO_MANY_REDIRECTS';
-    }
-}
-/**
-An error to be thrown when the server response code is not 2xx nor 3xx if `options.followRedirect` is `true`, but always except for 304.
-Includes a `response` property.
-*/
-// eslint-disable-next-line @typescript-eslint/naming-convention
-class HTTPError extends RequestError {
-    constructor(response) {
-        super(`Response code ${response.statusCode} (${response.statusMessage})`, {}, response.request);
-        this.name = 'HTTPError';
-        this.code = 'ERR_NON_2XX_3XX_RESPONSE';
-    }
-}
-/**
-An error to be thrown when a cache method fails.
-For example, if the database goes down or there's a filesystem error.
-*/
-class CacheError extends RequestError {
-    constructor(error, request) {
-        super(error.message, error, request);
-        this.name = 'CacheError';
-        this.code = this.code === 'ERR_GOT_REQUEST_ERROR' ? 'ERR_CACHE_ACCESS' : this.code;
-    }
-}
-/**
-An error to be thrown when the request body is a stream and an error occurs while reading from that stream.
-*/
-class UploadError extends RequestError {
-    constructor(error, request) {
-        super(error.message, error, request);
-        this.name = 'UploadError';
-        this.code = this.code === 'ERR_GOT_REQUEST_ERROR' ? 'ERR_UPLOAD' : this.code;
-    }
-}
-/**
-An error to be thrown when the request is aborted due to a timeout.
-Includes an `event` and `timings` property.
-*/
-class TimeoutError extends RequestError {
-    constructor(error, timings, request) {
-        super(error.message, error, request);
-        Object.defineProperty(this, "timings", {
-            enumerable: true,
-            configurable: true,
-            writable: true,
-            value: void 0
-        });
-        Object.defineProperty(this, "event", {
-            enumerable: true,
-            configurable: true,
-            writable: true,
-            value: void 0
-        });
-        this.name = 'TimeoutError';
-        this.event = error.event;
-        this.timings = timings;
-    }
-}
-/**
-An error to be thrown when reading from response stream fails.
-*/
-class ReadError extends RequestError {
-    constructor(error, request) {
-        super(error.message, error, request);
-        this.name = 'ReadError';
-        this.code = this.code === 'ERR_GOT_REQUEST_ERROR' ? 'ERR_READING_RESPONSE_STREAM' : this.code;
-    }
-}
-/**
-An error which always triggers a new retry when thrown.
-*/
-class RetryError extends RequestError {
-    constructor(request) {
-        super('Retrying', {}, request);
-        this.name = 'RetryError';
-        this.code = 'ERR_RETRYING';
-    }
-}
-/**
-An error to be thrown when the request is aborted by AbortController.
-*/
-class AbortError extends RequestError {
-    constructor(request) {
-        super('This operation was aborted.', {}, request);
-        this.code = 'ERR_ABORTED';
-        this.name = 'AbortError';
-    }
-}
-
-;// CONCATENATED MODULE: external "node:process"
-const external_node_process_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:process");
-;// CONCATENATED MODULE: external "node:buffer"
-const external_node_buffer_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:buffer");
-;// CONCATENATED MODULE: external "node:stream"
-const external_node_stream_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:stream");
-;// CONCATENATED MODULE: external "node:url"
-const external_node_url_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:url");
 ;// CONCATENATED MODULE: external "node:http"
 const external_node_http_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:http");
-// EXTERNAL MODULE: external "events"
-var external_events_ = __nccwpck_require__(2361);
-// EXTERNAL MODULE: external "util"
-var external_util_ = __nccwpck_require__(3837);
-// EXTERNAL MODULE: ./node_modules/defer-to-connect/dist/source/index.js
-var source = __nccwpck_require__(6214);
-;// CONCATENATED MODULE: ./node_modules/@szmarczak/http-timer/dist/source/index.js
-
-
-
-const timer = (request) => {
-    if (request.timings) {
-        return request.timings;
+;// CONCATENATED MODULE: external "node:https"
+const external_node_https_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:https");
+;// CONCATENATED MODULE: external "node:zlib"
+const external_node_zlib_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:zlib");
+;// CONCATENATED MODULE: external "node:stream"
+const external_node_stream_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:stream");
+;// CONCATENATED MODULE: external "node:buffer"
+const external_node_buffer_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:buffer");
+;// CONCATENATED MODULE: ./node_modules/data-uri-to-buffer/dist/index.js
+/**
+ * Returns a `Buffer` instance from the given data URI `uri`.
+ *
+ * @param {String} uri Data URI to turn into a Buffer instance
+ * @returns {Buffer} Buffer instance from Data URI
+ * @api public
+ */
+function dataUriToBuffer(uri) {
+    if (!/^data:/i.test(uri)) {
+        throw new TypeError('`uri` does not appear to be a Data URI (must begin with "data:")');
     }
-    const timings = {
-        start: Date.now(),
-        socket: undefined,
-        lookup: undefined,
-        connect: undefined,
-        secureConnect: undefined,
-        upload: undefined,
-        response: undefined,
-        end: undefined,
-        error: undefined,
-        abort: undefined,
-        phases: {
-            wait: undefined,
-            dns: undefined,
-            tcp: undefined,
-            tls: undefined,
-            request: undefined,
-            firstByte: undefined,
-            download: undefined,
-            total: undefined,
-        },
-    };
-    request.timings = timings;
-    const handleError = (origin) => {
-        origin.once(external_events_.errorMonitor, () => {
-            timings.error = Date.now();
-            timings.phases.total = timings.error - timings.start;
-        });
-    };
-    handleError(request);
-    const onAbort = () => {
-        timings.abort = Date.now();
-        timings.phases.total = timings.abort - timings.start;
-    };
-    request.prependOnceListener('abort', onAbort);
-    const onSocket = (socket) => {
-        timings.socket = Date.now();
-        timings.phases.wait = timings.socket - timings.start;
-        if (external_util_.types.isProxy(socket)) {
-            return;
+    // strip newlines
+    uri = uri.replace(/\r?\n/g, '');
+    // split the URI up into the "metadata" and the "data" portions
+    const firstComma = uri.indexOf(',');
+    if (firstComma === -1 || firstComma <= 4) {
+        throw new TypeError('malformed data: URI');
+    }
+    // remove the "data:" scheme and parse the metadata
+    const meta = uri.substring(5, firstComma).split(';');
+    let charset = '';
+    let base64 = false;
+    const type = meta[0] || 'text/plain';
+    let typeFull = type;
+    for (let i = 1; i < meta.length; i++) {
+        if (meta[i] === 'base64') {
+            base64 = true;
         }
-        const lookupListener = () => {
-            timings.lookup = Date.now();
-            timings.phases.dns = timings.lookup - timings.socket;
-        };
-        socket.prependOnceListener('lookup', lookupListener);
-        source(socket, {
-            connect: () => {
-                timings.connect = Date.now();
-                if (timings.lookup === undefined) {
-                    socket.removeListener('lookup', lookupListener);
-                    timings.lookup = timings.connect;
-                    timings.phases.dns = timings.lookup - timings.socket;
-                }
-                timings.phases.tcp = timings.connect - timings.lookup;
-            },
-            secureConnect: () => {
-                timings.secureConnect = Date.now();
-                timings.phases.tls = timings.secureConnect - timings.connect;
-            },
-        });
-    };
-    if (request.socket) {
-        onSocket(request.socket);
-    }
-    else {
-        request.prependOnceListener('socket', onSocket);
-    }
-    const onUpload = () => {
-        timings.upload = Date.now();
-        timings.phases.request = timings.upload - (timings.secureConnect ?? timings.connect);
-    };
-    if (request.writableFinished) {
-        onUpload();
-    }
-    else {
-        request.prependOnceListener('finish', onUpload);
-    }
-    request.prependOnceListener('response', (response) => {
-        timings.response = Date.now();
-        timings.phases.firstByte = timings.response - timings.upload;
-        response.timings = timings;
-        handleError(response);
-        response.prependOnceListener('end', () => {
-            request.off('abort', onAbort);
-            response.off('aborted', onAbort);
-            if (timings.phases.total) {
-                // Aborted or errored
-                return;
+        else {
+            typeFull += `;${meta[i]}`;
+            if (meta[i].indexOf('charset=') === 0) {
+                charset = meta[i].substring(8);
             }
-            timings.end = Date.now();
-            timings.phases.download = timings.end - timings.response;
-            timings.phases.total = timings.end - timings.start;
-        });
-        response.prependOnceListener('aborted', onAbort);
-    });
-    return timings;
+        }
+    }
+    // defaults to US-ASCII only if type is not provided
+    if (!meta[0] && !charset.length) {
+        typeFull += ';charset=US-ASCII';
+        charset = 'US-ASCII';
+    }
+    // get the encoded data portion and decode URI-encoded chars
+    const encoding = base64 ? 'base64' : 'ascii';
+    const data = unescape(uri.substring(firstComma + 1));
+    const buffer = Buffer.from(data, encoding);
+    // set `.type` and `.typeFull` properties to MIME type
+    buffer.type = type;
+    buffer.typeFull = typeFull;
+    // set the `.charset` property
+    buffer.charset = charset;
+    return buffer;
+}
+/* harmony default export */ const dist = (dataUriToBuffer);
+//# sourceMappingURL=index.js.map
+;// CONCATENATED MODULE: external "node:util"
+const external_node_util_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:util");
+// EXTERNAL MODULE: ./node_modules/fetch-blob/index.js
+var fetch_blob = __nccwpck_require__(1410);
+// EXTERNAL MODULE: ./node_modules/formdata-polyfill/esm.min.js
+var esm_min = __nccwpck_require__(8010);
+;// CONCATENATED MODULE: ./node_modules/node-fetch/src/errors/base.js
+class FetchBaseError extends Error {
+	constructor(message, type) {
+		super(message);
+		// Hide custom error implementation details from end-users
+		Error.captureStackTrace(this, this.constructor);
+
+		this.type = type;
+	}
+
+	get name() {
+		return this.constructor.name;
+	}
+
+	get [Symbol.toStringTag]() {
+		return this.constructor.name;
+	}
+}
+
+;// CONCATENATED MODULE: ./node_modules/node-fetch/src/errors/fetch-error.js
+
+
+
+/**
+ * @typedef {{ address?: string, code: string, dest?: string, errno: number, info?: object, message: string, path?: string, port?: number, syscall: string}} SystemError
+*/
+
+/**
+ * FetchError interface for operational errors
+ */
+class FetchError extends FetchBaseError {
+	/**
+	 * @param  {string} message -      Error message for human
+	 * @param  {string} [type] -        Error type for machine
+	 * @param  {SystemError} [systemError] - For Node.js system error
+	 */
+	constructor(message, type, systemError) {
+		super(message, type);
+		// When err.type is `system`, err.erroredSysCall contains system error and err.code contains system error code
+		if (systemError) {
+			// eslint-disable-next-line no-multi-assign
+			this.code = this.errno = systemError.code;
+			this.erroredSysCall = systemError.syscall;
+		}
+	}
+}
+
+;// CONCATENATED MODULE: ./node_modules/node-fetch/src/utils/is.js
+/**
+ * Is.js
+ *
+ * Object type checks.
+ */
+
+const NAME = Symbol.toStringTag;
+
+/**
+ * Check if `obj` is a URLSearchParams object
+ * ref: https://github.com/node-fetch/node-fetch/issues/296#issuecomment-307598143
+ * @param {*} object - Object to check for
+ * @return {boolean}
+ */
+const isURLSearchParameters = object => {
+	return (
+		typeof object === 'object' &&
+		typeof object.append === 'function' &&
+		typeof object.delete === 'function' &&
+		typeof object.get === 'function' &&
+		typeof object.getAll === 'function' &&
+		typeof object.has === 'function' &&
+		typeof object.set === 'function' &&
+		typeof object.sort === 'function' &&
+		object[NAME] === 'URLSearchParams'
+	);
 };
-/* harmony default export */ const dist_source = (timer);
 
-;// CONCATENATED MODULE: external "node:crypto"
-const external_node_crypto_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:crypto");
-;// CONCATENATED MODULE: ./node_modules/normalize-url/index.js
-// https://developer.mozilla.org/en-US/docs/Web/HTTP/Basics_of_HTTP/Data_URIs
-const DATA_URL_DEFAULT_MIME_TYPE = 'text/plain';
-const DATA_URL_DEFAULT_CHARSET = 'us-ascii';
+/**
+ * Check if `object` is a W3C `Blob` object (which `File` inherits from)
+ * @param {*} object - Object to check for
+ * @return {boolean}
+ */
+const isBlob = object => {
+	return (
+		object &&
+		typeof object === 'object' &&
+		typeof object.arrayBuffer === 'function' &&
+		typeof object.type === 'string' &&
+		typeof object.stream === 'function' &&
+		typeof object.constructor === 'function' &&
+		/^(Blob|File)$/.test(object[NAME])
+	);
+};
 
-const testParameter = (name, filters) => filters.some(filter => filter instanceof RegExp ? filter.test(name) : filter === name);
+/**
+ * Check if `obj` is an instance of AbortSignal.
+ * @param {*} object - Object to check for
+ * @return {boolean}
+ */
+const isAbortSignal = object => {
+	return (
+		typeof object === 'object' && (
+			object[NAME] === 'AbortSignal' ||
+			object[NAME] === 'EventTarget'
+		)
+	);
+};
 
-const normalizeDataURL = (urlString, {stripHash}) => {
-	const match = /^data:(?<type>[^,]*?),(?<data>[^#]*?)(?:#(?<hash>.*))?$/.exec(urlString);
+/**
+ * isDomainOrSubdomain reports whether sub is a subdomain (or exact match) of
+ * the parent domain.
+ *
+ * Both domains must already be in canonical form.
+ * @param {string|URL} original
+ * @param {string|URL} destination
+ */
+const isDomainOrSubdomain = (destination, original) => {
+	const orig = new URL(original).hostname;
+	const dest = new URL(destination).hostname;
 
-	if (!match) {
-		throw new Error(`Invalid URL: ${urlString}`);
+	return orig === dest || orig.endsWith(`.${dest}`);
+};
+
+/**
+ * isSameProtocol reports whether the two provided URLs use the same protocol.
+ *
+ * Both domains must already be in canonical form.
+ * @param {string|URL} original
+ * @param {string|URL} destination
+ */
+const isSameProtocol = (destination, original) => {
+	const orig = new URL(original).protocol;
+	const dest = new URL(destination).protocol;
+
+	return orig === dest;
+};
+
+;// CONCATENATED MODULE: ./node_modules/node-fetch/src/body.js
+
+/**
+ * Body.js
+ *
+ * Body interface provides common methods for Request and Response
+ */
+
+
+
+
+
+
+
+
+
+
+
+
+const pipeline = (0,external_node_util_namespaceObject.promisify)(external_node_stream_namespaceObject.pipeline);
+const INTERNALS = Symbol('Body internals');
+
+/**
+ * Body mixin
+ *
+ * Ref: https://fetch.spec.whatwg.org/#body
+ *
+ * @param   Stream  body  Readable stream
+ * @param   Object  opts  Response options
+ * @return  Void
+ */
+class Body {
+	constructor(body, {
+		size = 0
+	} = {}) {
+		let boundary = null;
+
+		if (body === null) {
+			// Body is undefined or null
+			body = null;
+		} else if (isURLSearchParameters(body)) {
+			// Body is a URLSearchParams
+			body = external_node_buffer_namespaceObject.Buffer.from(body.toString());
+		} else if (isBlob(body)) {
+			// Body is blob
+		} else if (external_node_buffer_namespaceObject.Buffer.isBuffer(body)) {
+			// Body is Buffer
+		} else if (external_node_util_namespaceObject.types.isAnyArrayBuffer(body)) {
+			// Body is ArrayBuffer
+			body = external_node_buffer_namespaceObject.Buffer.from(body);
+		} else if (ArrayBuffer.isView(body)) {
+			// Body is ArrayBufferView
+			body = external_node_buffer_namespaceObject.Buffer.from(body.buffer, body.byteOffset, body.byteLength);
+		} else if (body instanceof external_node_stream_namespaceObject) {
+			// Body is stream
+		} else if (body instanceof esm_min/* FormData */.Ct) {
+			// Body is FormData
+			body = (0,esm_min/* formDataToBlob */.au)(body);
+			boundary = body.type.split('=')[1];
+		} else {
+			// None of the above
+			// coerce to string then buffer
+			body = external_node_buffer_namespaceObject.Buffer.from(String(body));
+		}
+
+		let stream = body;
+
+		if (external_node_buffer_namespaceObject.Buffer.isBuffer(body)) {
+			stream = external_node_stream_namespaceObject.Readable.from(body);
+		} else if (isBlob(body)) {
+			stream = external_node_stream_namespaceObject.Readable.from(body.stream());
+		}
+
+		this[INTERNALS] = {
+			body,
+			stream,
+			boundary,
+			disturbed: false,
+			error: null
+		};
+		this.size = size;
+
+		if (body instanceof external_node_stream_namespaceObject) {
+			body.on('error', error_ => {
+				const error = error_ instanceof FetchBaseError ?
+					error_ :
+					new FetchError(`Invalid response body while trying to fetch ${this.url}: ${error_.message}`, 'system', error_);
+				this[INTERNALS].error = error;
+			});
+		}
 	}
 
-	let {type, data, hash} = match.groups;
-	const mediaType = type.split(';');
-	hash = stripHash ? '' : hash;
-
-	let isBase64 = false;
-	if (mediaType[mediaType.length - 1] === 'base64') {
-		mediaType.pop();
-		isBase64 = true;
+	get body() {
+		return this[INTERNALS].stream;
 	}
 
-	// Lowercase MIME type
-	const mimeType = (mediaType.shift() || '').toLowerCase();
-	const attributes = mediaType
-		.map(attribute => {
-			let [key, value = ''] = attribute.split('=').map(string => string.trim());
+	get bodyUsed() {
+		return this[INTERNALS].disturbed;
+	}
 
-			// Lowercase `charset`
-			if (key === 'charset') {
-				value = value.toLowerCase();
+	/**
+	 * Decode response as ArrayBuffer
+	 *
+	 * @return  Promise
+	 */
+	async arrayBuffer() {
+		const {buffer, byteOffset, byteLength} = await consumeBody(this);
+		return buffer.slice(byteOffset, byteOffset + byteLength);
+	}
 
-				if (value === DATA_URL_DEFAULT_CHARSET) {
-					return '';
-				}
+	async formData() {
+		const ct = this.headers.get('content-type');
+
+		if (ct.startsWith('application/x-www-form-urlencoded')) {
+			const formData = new esm_min/* FormData */.Ct();
+			const parameters = new URLSearchParams(await this.text());
+
+			for (const [name, value] of parameters) {
+				formData.append(name, value);
 			}
 
-			return `${key}${value ? `=${value}` : ''}`;
-		})
-		.filter(Boolean);
+			return formData;
+		}
 
-	const normalizedMediaType = [
-		...attributes,
-	];
-
-	if (isBase64) {
-		normalizedMediaType.push('base64');
+		const {toFormData} = await __nccwpck_require__.e(/* import() */ 37).then(__nccwpck_require__.bind(__nccwpck_require__, 4037));
+		return toFormData(this.body, ct);
 	}
 
-	if (normalizedMediaType.length > 0 || (mimeType && mimeType !== DATA_URL_DEFAULT_MIME_TYPE)) {
-		normalizedMediaType.unshift(mimeType);
+	/**
+	 * Return raw response as Blob
+	 *
+	 * @return Promise
+	 */
+	async blob() {
+		const ct = (this.headers && this.headers.get('content-type')) || (this[INTERNALS].body && this[INTERNALS].body.type) || '';
+		const buf = await this.arrayBuffer();
+
+		return new fetch_blob/* default */.Z([buf], {
+			type: ct
+		});
 	}
 
-	return `data:${normalizedMediaType.join(';')},${isBase64 ? data.trim() : data}${hash ? `#${hash}` : ''}`;
+	/**
+	 * Decode response as json
+	 *
+	 * @return  Promise
+	 */
+	async json() {
+		const text = await this.text();
+		return JSON.parse(text);
+	}
+
+	/**
+	 * Decode response as text
+	 *
+	 * @return  Promise
+	 */
+	async text() {
+		const buffer = await consumeBody(this);
+		return new TextDecoder().decode(buffer);
+	}
+
+	/**
+	 * Decode response as buffer (non-spec api)
+	 *
+	 * @return  Promise
+	 */
+	buffer() {
+		return consumeBody(this);
+	}
+}
+
+Body.prototype.buffer = (0,external_node_util_namespaceObject.deprecate)(Body.prototype.buffer, 'Please use \'response.arrayBuffer()\' instead of \'response.buffer()\'', 'node-fetch#buffer');
+
+// In browsers, all properties are enumerable.
+Object.defineProperties(Body.prototype, {
+	body: {enumerable: true},
+	bodyUsed: {enumerable: true},
+	arrayBuffer: {enumerable: true},
+	blob: {enumerable: true},
+	json: {enumerable: true},
+	text: {enumerable: true},
+	data: {get: (0,external_node_util_namespaceObject.deprecate)(() => {},
+		'data doesn\'t exist, use json(), text(), arrayBuffer(), or body instead',
+		'https://github.com/node-fetch/node-fetch/issues/1000 (response)')}
+});
+
+/**
+ * Consume and convert an entire Body to a Buffer.
+ *
+ * Ref: https://fetch.spec.whatwg.org/#concept-body-consume-body
+ *
+ * @return Promise
+ */
+async function consumeBody(data) {
+	if (data[INTERNALS].disturbed) {
+		throw new TypeError(`body used already for: ${data.url}`);
+	}
+
+	data[INTERNALS].disturbed = true;
+
+	if (data[INTERNALS].error) {
+		throw data[INTERNALS].error;
+	}
+
+	const {body} = data;
+
+	// Body is null
+	if (body === null) {
+		return external_node_buffer_namespaceObject.Buffer.alloc(0);
+	}
+
+	/* c8 ignore next 3 */
+	if (!(body instanceof external_node_stream_namespaceObject)) {
+		return external_node_buffer_namespaceObject.Buffer.alloc(0);
+	}
+
+	// Body is stream
+	// get ready to actually consume the body
+	const accum = [];
+	let accumBytes = 0;
+
+	try {
+		for await (const chunk of body) {
+			if (data.size > 0 && accumBytes + chunk.length > data.size) {
+				const error = new FetchError(`content size at ${data.url} over limit: ${data.size}`, 'max-size');
+				body.destroy(error);
+				throw error;
+			}
+
+			accumBytes += chunk.length;
+			accum.push(chunk);
+		}
+	} catch (error) {
+		const error_ = error instanceof FetchBaseError ? error : new FetchError(`Invalid response body while trying to fetch ${data.url}: ${error.message}`, 'system', error);
+		throw error_;
+	}
+
+	if (body.readableEnded === true || body._readableState.ended === true) {
+		try {
+			if (accum.every(c => typeof c === 'string')) {
+				return external_node_buffer_namespaceObject.Buffer.from(accum.join(''));
+			}
+
+			return external_node_buffer_namespaceObject.Buffer.concat(accum, accumBytes);
+		} catch (error) {
+			throw new FetchError(`Could not create Buffer from response body for ${data.url}: ${error.message}`, 'system', error);
+		}
+	} else {
+		throw new FetchError(`Premature close of server response while trying to fetch ${data.url}`);
+	}
+}
+
+/**
+ * Clone body given Res/Req instance
+ *
+ * @param   Mixed   instance       Response or Request instance
+ * @param   String  highWaterMark  highWaterMark for both PassThrough body streams
+ * @return  Mixed
+ */
+const clone = (instance, highWaterMark) => {
+	let p1;
+	let p2;
+	let {body} = instance[INTERNALS];
+
+	// Don't allow cloning a used body
+	if (instance.bodyUsed) {
+		throw new Error('cannot clone body after it is used');
+	}
+
+	// Check that body is a stream and not form-data object
+	// note: we can't clone the form-data object without having it as a dependency
+	if ((body instanceof external_node_stream_namespaceObject) && (typeof body.getBoundary !== 'function')) {
+		// Tee instance body
+		p1 = new external_node_stream_namespaceObject.PassThrough({highWaterMark});
+		p2 = new external_node_stream_namespaceObject.PassThrough({highWaterMark});
+		body.pipe(p1);
+		body.pipe(p2);
+		// Set instance body to teed body and return the other teed body
+		instance[INTERNALS].stream = p1;
+		body = p2;
+	}
+
+	return body;
 };
 
-function normalizeUrl(urlString, options) {
-	options = {
-		defaultProtocol: 'http:',
-		normalizeProtocol: true,
-		forceHttp: false,
-		forceHttps: false,
-		stripAuthentication: true,
-		stripHash: false,
-		stripTextFragment: true,
-		stripWWW: true,
-		removeQueryParameters: [/^utm_\w+/i],
-		removeTrailingSlash: true,
-		removeSingleSlash: true,
-		removeDirectoryIndex: false,
-		removeExplicitPort: false,
-		sortQueryParameters: true,
-		...options,
+const getNonSpecFormDataBoundary = (0,external_node_util_namespaceObject.deprecate)(
+	body => body.getBoundary(),
+	'form-data doesn\'t follow the spec and requires special treatment. Use alternative package',
+	'https://github.com/node-fetch/node-fetch/issues/1167'
+);
+
+/**
+ * Performs the operation "extract a `Content-Type` value from |object|" as
+ * specified in the specification:
+ * https://fetch.spec.whatwg.org/#concept-bodyinit-extract
+ *
+ * This function assumes that instance.body is present.
+ *
+ * @param {any} body Any options.body input
+ * @returns {string | null}
+ */
+const extractContentType = (body, request) => {
+	// Body is null or undefined
+	if (body === null) {
+		return null;
+	}
+
+	// Body is string
+	if (typeof body === 'string') {
+		return 'text/plain;charset=UTF-8';
+	}
+
+	// Body is a URLSearchParams
+	if (isURLSearchParameters(body)) {
+		return 'application/x-www-form-urlencoded;charset=UTF-8';
+	}
+
+	// Body is blob
+	if (isBlob(body)) {
+		return body.type || null;
+	}
+
+	// Body is a Buffer (Buffer, ArrayBuffer or ArrayBufferView)
+	if (external_node_buffer_namespaceObject.Buffer.isBuffer(body) || external_node_util_namespaceObject.types.isAnyArrayBuffer(body) || ArrayBuffer.isView(body)) {
+		return null;
+	}
+
+	if (body instanceof esm_min/* FormData */.Ct) {
+		return `multipart/form-data; boundary=${request[INTERNALS].boundary}`;
+	}
+
+	// Detect form data input from form-data module
+	if (body && typeof body.getBoundary === 'function') {
+		return `multipart/form-data;boundary=${getNonSpecFormDataBoundary(body)}`;
+	}
+
+	// Body is stream - can't really do much about this
+	if (body instanceof external_node_stream_namespaceObject) {
+		return null;
+	}
+
+	// Body constructor defaults other things to string
+	return 'text/plain;charset=UTF-8';
+};
+
+/**
+ * The Fetch Standard treats this as if "total bytes" is a property on the body.
+ * For us, we have to explicitly get it with a function.
+ *
+ * ref: https://fetch.spec.whatwg.org/#concept-body-total-bytes
+ *
+ * @param {any} obj.body Body object from the Body instance.
+ * @returns {number | null}
+ */
+const getTotalBytes = request => {
+	const {body} = request[INTERNALS];
+
+	// Body is null or undefined
+	if (body === null) {
+		return 0;
+	}
+
+	// Body is Blob
+	if (isBlob(body)) {
+		return body.size;
+	}
+
+	// Body is Buffer
+	if (external_node_buffer_namespaceObject.Buffer.isBuffer(body)) {
+		return body.length;
+	}
+
+	// Detect form data input from form-data module
+	if (body && typeof body.getLengthSync === 'function') {
+		return body.hasKnownLength && body.hasKnownLength() ? body.getLengthSync() : null;
+	}
+
+	// Body is stream
+	return null;
+};
+
+/**
+ * Write a Body to a Node.js WritableStream (e.g. http.Request) object.
+ *
+ * @param {Stream.Writable} dest The stream to write to.
+ * @param obj.body Body object from the Body instance.
+ * @returns {Promise<void>}
+ */
+const writeToStream = async (dest, {body}) => {
+	if (body === null) {
+		// Body is null
+		dest.end();
+	} else {
+		// Body is stream
+		await pipeline(body, dest);
+	}
+};
+
+;// CONCATENATED MODULE: ./node_modules/node-fetch/src/headers.js
+/**
+ * Headers.js
+ *
+ * Headers class offers convenient helpers
+ */
+
+
+
+
+/* c8 ignore next 9 */
+const validateHeaderName = typeof external_node_http_namespaceObject.validateHeaderName === 'function' ?
+	external_node_http_namespaceObject.validateHeaderName :
+	name => {
+		if (!/^[\^`\-\w!#$%&'*+.|~]+$/.test(name)) {
+			const error = new TypeError(`Header name must be a valid HTTP token [${name}]`);
+			Object.defineProperty(error, 'code', {value: 'ERR_INVALID_HTTP_TOKEN'});
+			throw error;
+		}
 	};
 
-	urlString = urlString.trim();
+/* c8 ignore next 9 */
+const validateHeaderValue = typeof external_node_http_namespaceObject.validateHeaderValue === 'function' ?
+	external_node_http_namespaceObject.validateHeaderValue :
+	(name, value) => {
+		if (/[^\t\u0020-\u007E\u0080-\u00FF]/.test(value)) {
+			const error = new TypeError(`Invalid character in header content ["${name}"]`);
+			Object.defineProperty(error, 'code', {value: 'ERR_INVALID_CHAR'});
+			throw error;
+		}
+	};
 
-	// Data URL
-	if (/^data:/i.test(urlString)) {
-		return normalizeDataURL(urlString, options);
-	}
+/**
+ * @typedef {Headers | Record<string, string> | Iterable<readonly [string, string]> | Iterable<Iterable<string>>} HeadersInit
+ */
 
-	if (/^view-source:/i.test(urlString)) {
-		throw new Error('`view-source:` is not supported as it is a non-standard protocol');
-	}
-
-	const hasRelativeProtocol = urlString.startsWith('//');
-	const isRelativeUrl = !hasRelativeProtocol && /^\.*\//.test(urlString);
-
-	// Prepend protocol
-	if (!isRelativeUrl) {
-		urlString = urlString.replace(/^(?!(?:\w+:)?\/\/)|^\/\//, options.defaultProtocol);
-	}
-
-	const urlObject = new URL(urlString);
-
-	if (options.forceHttp && options.forceHttps) {
-		throw new Error('The `forceHttp` and `forceHttps` options cannot be used together');
-	}
-
-	if (options.forceHttp && urlObject.protocol === 'https:') {
-		urlObject.protocol = 'http:';
-	}
-
-	if (options.forceHttps && urlObject.protocol === 'http:') {
-		urlObject.protocol = 'https:';
-	}
-
-	// Remove auth
-	if (options.stripAuthentication) {
-		urlObject.username = '';
-		urlObject.password = '';
-	}
-
-	// Remove hash
-	if (options.stripHash) {
-		urlObject.hash = '';
-	} else if (options.stripTextFragment) {
-		urlObject.hash = urlObject.hash.replace(/#?:~:text.*?$/i, '');
-	}
-
-	// Remove duplicate slashes if not preceded by a protocol
-	// NOTE: This could be implemented using a single negative lookbehind
-	// regex, but we avoid that to maintain compatibility with older js engines
-	// which do not have support for that feature.
-	if (urlObject.pathname) {
-		// TODO: Replace everything below with `urlObject.pathname = urlObject.pathname.replace(/(?<!\b[a-z][a-z\d+\-.]{1,50}:)\/{2,}/g, '/');` when Safari supports negative lookbehind.
-
-		// Split the string by occurrences of this protocol regex, and perform
-		// duplicate-slash replacement on the strings between those occurrences
-		// (if any).
-		const protocolRegex = /\b[a-z][a-z\d+\-.]{1,50}:\/\//g;
-
-		let lastIndex = 0;
-		let result = '';
-		for (;;) {
-			const match = protocolRegex.exec(urlObject.pathname);
-			if (!match) {
-				break;
+/**
+ * This Fetch API interface allows you to perform various actions on HTTP request and response headers.
+ * These actions include retrieving, setting, adding to, and removing.
+ * A Headers object has an associated header list, which is initially empty and consists of zero or more name and value pairs.
+ * You can add to this using methods like append() (see Examples.)
+ * In all methods of this interface, header names are matched by case-insensitive byte sequence.
+ *
+ */
+class Headers extends URLSearchParams {
+	/**
+	 * Headers class
+	 *
+	 * @constructor
+	 * @param {HeadersInit} [init] - Response headers
+	 */
+	constructor(init) {
+		// Validate and normalize init object in [name, value(s)][]
+		/** @type {string[][]} */
+		let result = [];
+		if (init instanceof Headers) {
+			const raw = init.raw();
+			for (const [name, values] of Object.entries(raw)) {
+				result.push(...values.map(value => [name, value]));
 			}
+		} else if (init == null) { // eslint-disable-line no-eq-null, eqeqeq
+			// No op
+		} else if (typeof init === 'object' && !external_node_util_namespaceObject.types.isBoxedPrimitive(init)) {
+			const method = init[Symbol.iterator];
+			// eslint-disable-next-line no-eq-null, eqeqeq
+			if (method == null) {
+				// Record<ByteString, ByteString>
+				result.push(...Object.entries(init));
+			} else {
+				if (typeof method !== 'function') {
+					throw new TypeError('Header pairs must be iterable');
+				}
 
-			const protocol = match[0];
-			const protocolAtIndex = match.index;
-			const intermediate = urlObject.pathname.slice(lastIndex, protocolAtIndex);
+				// Sequence<sequence<ByteString>>
+				// Note: per spec we have to first exhaust the lists then process them
+				result = [...init]
+					.map(pair => {
+						if (
+							typeof pair !== 'object' || external_node_util_namespaceObject.types.isBoxedPrimitive(pair)
+						) {
+							throw new TypeError('Each header pair must be an iterable object');
+						}
 
-			result += intermediate.replace(/\/{2,}/g, '/');
-			result += protocol;
-			lastIndex = protocolAtIndex + protocol.length;
-		}
+						return [...pair];
+					}).map(pair => {
+						if (pair.length !== 2) {
+							throw new TypeError('Each header pair must be a name/value tuple');
+						}
 
-		const remnant = urlObject.pathname.slice(lastIndex, urlObject.pathname.length);
-		result += remnant.replace(/\/{2,}/g, '/');
-
-		urlObject.pathname = result;
-	}
-
-	// Decode URI octets
-	if (urlObject.pathname) {
-		try {
-			urlObject.pathname = decodeURI(urlObject.pathname);
-		} catch {}
-	}
-
-	// Remove directory index
-	if (options.removeDirectoryIndex === true) {
-		options.removeDirectoryIndex = [/^index\.[a-z]+$/];
-	}
-
-	if (Array.isArray(options.removeDirectoryIndex) && options.removeDirectoryIndex.length > 0) {
-		let pathComponents = urlObject.pathname.split('/');
-		const lastComponent = pathComponents[pathComponents.length - 1];
-
-		if (testParameter(lastComponent, options.removeDirectoryIndex)) {
-			pathComponents = pathComponents.slice(0, -1);
-			urlObject.pathname = pathComponents.slice(1).join('/') + '/';
-		}
-	}
-
-	if (urlObject.hostname) {
-		// Remove trailing dot
-		urlObject.hostname = urlObject.hostname.replace(/\.$/, '');
-
-		// Remove `www.`
-		if (options.stripWWW && /^www\.(?!www\.)[a-z\-\d]{1,63}\.[a-z.\-\d]{2,63}$/.test(urlObject.hostname)) {
-			// Each label should be max 63 at length (min: 1).
-			// Source: https://en.wikipedia.org/wiki/Hostname#Restrictions_on_valid_host_names
-			// Each TLD should be up to 63 characters long (min: 2).
-			// It is technically possible to have a single character TLD, but none currently exist.
-			urlObject.hostname = urlObject.hostname.replace(/^www\./, '');
-		}
-	}
-
-	// Remove query unwanted parameters
-	if (Array.isArray(options.removeQueryParameters)) {
-		// eslint-disable-next-line unicorn/no-useless-spread -- We are intentionally spreading to get a copy.
-		for (const key of [...urlObject.searchParams.keys()]) {
-			if (testParameter(key, options.removeQueryParameters)) {
-				urlObject.searchParams.delete(key);
+						return [...pair];
+					});
 			}
+		} else {
+			throw new TypeError('Failed to construct \'Headers\': The provided value is not of type \'(sequence<sequence<ByteString>> or record<ByteString, ByteString>)');
 		}
-	}
 
-	if (!Array.isArray(options.keepQueryParameters) && options.removeQueryParameters === true) {
-		urlObject.search = '';
-	}
+		// Validate and lowercase
+		result =
+			result.length > 0 ?
+				result.map(([name, value]) => {
+					validateHeaderName(name);
+					validateHeaderValue(name, String(value));
+					return [String(name).toLowerCase(), String(value)];
+				}) :
+				undefined;
 
-	// Keep wanted query parameters
-	if (Array.isArray(options.keepQueryParameters) && options.keepQueryParameters.length > 0) {
-		// eslint-disable-next-line unicorn/no-useless-spread -- We are intentionally spreading to get a copy.
-		for (const key of [...urlObject.searchParams.keys()]) {
-			if (!testParameter(key, options.keepQueryParameters)) {
-				urlObject.searchParams.delete(key);
+		super(result);
+
+		// Returning a Proxy that will lowercase key names, validate parameters and sort keys
+		// eslint-disable-next-line no-constructor-return
+		return new Proxy(this, {
+			get(target, p, receiver) {
+				switch (p) {
+					case 'append':
+					case 'set':
+						return (name, value) => {
+							validateHeaderName(name);
+							validateHeaderValue(name, String(value));
+							return URLSearchParams.prototype[p].call(
+								target,
+								String(name).toLowerCase(),
+								String(value)
+							);
+						};
+
+					case 'delete':
+					case 'has':
+					case 'getAll':
+						return name => {
+							validateHeaderName(name);
+							return URLSearchParams.prototype[p].call(
+								target,
+								String(name).toLowerCase()
+							);
+						};
+
+					case 'keys':
+						return () => {
+							target.sort();
+							return new Set(URLSearchParams.prototype.keys.call(target)).keys();
+						};
+
+					default:
+						return Reflect.get(target, p, receiver);
+				}
 			}
-		}
-	}
-
-	// Sort query parameters
-	if (options.sortQueryParameters) {
-		urlObject.searchParams.sort();
-
-		// Calling `.sort()` encodes the search parameters, so we need to decode them again.
-		try {
-			urlObject.search = decodeURIComponent(urlObject.search);
-		} catch {}
-	}
-
-	if (options.removeTrailingSlash) {
-		urlObject.pathname = urlObject.pathname.replace(/\/$/, '');
-	}
-
-	// Remove an explicit port number, excluding a default port number, if applicable
-	if (options.removeExplicitPort && urlObject.port) {
-		urlObject.port = '';
-	}
-
-	const oldUrlString = urlString;
-
-	// Take advantage of many of the Node `url` normalizations
-	urlString = urlObject.toString();
-
-	if (!options.removeSingleSlash && urlObject.pathname === '/' && !oldUrlString.endsWith('/') && urlObject.hash === '') {
-		urlString = urlString.replace(/\/$/, '');
-	}
-
-	// Remove ending `/` unless removeSingleSlash is false
-	if ((options.removeTrailingSlash || urlObject.pathname === '/') && urlObject.hash === '' && options.removeSingleSlash) {
-		urlString = urlString.replace(/\/$/, '');
-	}
-
-	// Restore relative protocol, if applicable
-	if (hasRelativeProtocol && !options.normalizeProtocol) {
-		urlString = urlString.replace(/^http:\/\//, '//');
-	}
-
-	// Remove http/https
-	if (options.stripProtocol) {
-		urlString = urlString.replace(/^(?:https?:)?\/\//, '');
-	}
-
-	return urlString;
-}
-
-// EXTERNAL MODULE: ./node_modules/get-stream/index.js
-var get_stream = __nccwpck_require__(1766);
-// EXTERNAL MODULE: ./node_modules/http-cache-semantics/index.js
-var http_cache_semantics = __nccwpck_require__(1002);
-;// CONCATENATED MODULE: ./node_modules/lowercase-keys/index.js
-function lowercaseKeys(object) {
-	return Object.fromEntries(Object.entries(object).map(([key, value]) => [key.toLowerCase(), value]));
-}
-
-;// CONCATENATED MODULE: ./node_modules/responselike/index.js
-
-
-
-class Response extends external_node_stream_namespaceObject.Readable {
-	statusCode;
-	headers;
-	body;
-	url;
-
-	constructor({statusCode, headers, body, url}) {
-		if (typeof statusCode !== 'number') {
-			throw new TypeError('Argument `statusCode` should be a number');
-		}
-
-		if (typeof headers !== 'object') {
-			throw new TypeError('Argument `headers` should be an object');
-		}
-
-		if (!(body instanceof Uint8Array)) {
-			throw new TypeError('Argument `body` should be a buffer');
-		}
-
-		if (typeof url !== 'string') {
-			throw new TypeError('Argument `url` should be a string');
-		}
-
-		super({
-			read() {
-				this.push(body);
-				this.push(null);
-			},
 		});
+		/* c8 ignore next */
+	}
 
-		this.statusCode = statusCode;
-		this.headers = lowercaseKeys(headers);
-		this.body = body;
-		this.url = url;
+	get [Symbol.toStringTag]() {
+		return this.constructor.name;
+	}
+
+	toString() {
+		return Object.prototype.toString.call(this);
+	}
+
+	get(name) {
+		const values = this.getAll(name);
+		if (values.length === 0) {
+			return null;
+		}
+
+		let value = values.join(', ');
+		if (/^content-encoding$/i.test(name)) {
+			value = value.toLowerCase();
+		}
+
+		return value;
+	}
+
+	forEach(callback, thisArg = undefined) {
+		for (const name of this.keys()) {
+			Reflect.apply(callback, thisArg, [this.get(name), name, this]);
+		}
+	}
+
+	* values() {
+		for (const name of this.keys()) {
+			yield this.get(name);
+		}
+	}
+
+	/**
+	 * @type {() => IterableIterator<[string, string]>}
+	 */
+	* entries() {
+		for (const name of this.keys()) {
+			yield [name, this.get(name)];
+		}
+	}
+
+	[Symbol.iterator]() {
+		return this.entries();
+	}
+
+	/**
+	 * Node-fetch non-spec method
+	 * returning all headers and their values as array
+	 * @returns {Record<string, string[]>}
+	 */
+	raw() {
+		return [...this.keys()].reduce((result, key) => {
+			result[key] = this.getAll(key);
+			return result;
+		}, {});
+	}
+
+	/**
+	 * For better console.log(headers) and also to convert Headers into Node.js Request compatible format
+	 */
+	[Symbol.for('nodejs.util.inspect.custom')]() {
+		return [...this.keys()].reduce((result, key) => {
+			const values = this.getAll(key);
+			// Http.request() only supports string as Host header.
+			// This hack makes specifying custom Host header possible.
+			if (key === 'host') {
+				result[key] = values[0];
+			} else {
+				result[key] = values.length > 1 ? values : values[0];
+			}
+
+			return result;
+		}, {});
 	}
 }
 
-// EXTERNAL MODULE: ./node_modules/keyv/src/index.js
-var src = __nccwpck_require__(1531);
-;// CONCATENATED MODULE: ./node_modules/mimic-response/index.js
-// We define these manually to ensure they're always copied
-// even if they would move up the prototype chain
-// https://nodejs.org/api/http.html#http_class_http_incomingmessage
-const knownProperties = [
-	'aborted',
-	'complete',
-	'headers',
-	'httpVersion',
-	'httpVersionMinor',
-	'httpVersionMajor',
-	'method',
-	'rawHeaders',
-	'rawTrailers',
-	'setTimeout',
-	'socket',
-	'statusCode',
-	'statusMessage',
-	'trailers',
-	'url',
-];
+/**
+ * Re-shaping object for Web IDL tests
+ * Only need to do it for overridden methods
+ */
+Object.defineProperties(
+	Headers.prototype,
+	['get', 'entries', 'forEach', 'values'].reduce((result, property) => {
+		result[property] = {enumerable: true};
+		return result;
+	}, {})
+);
 
-function mimicResponse(fromStream, toStream) {
-	if (toStream._readableState.autoDestroy) {
-		throw new Error('The second stream must have the `autoDestroy` option set to `false`');
-	}
+/**
+ * Create a Headers object from an http.IncomingMessage.rawHeaders, ignoring those that do
+ * not conform to HTTP grammar productions.
+ * @param {import('http').IncomingMessage['rawHeaders']} headers
+ */
+function fromRawHeaders(headers = []) {
+	return new Headers(
+		headers
+			// Split into pairs
+			.reduce((result, value, index, array) => {
+				if (index % 2 === 0) {
+					result.push(array.slice(index, index + 2));
+				}
 
-	const fromProperties = new Set([...Object.keys(fromStream), ...knownProperties]);
+				return result;
+			}, [])
+			.filter(([name, value]) => {
+				try {
+					validateHeaderName(name);
+					validateHeaderValue(name, String(value));
+					return true;
+				} catch {
+					return false;
+				}
+			})
 
-	const properties = {};
+	);
+}
 
-	for (const property of fromProperties) {
-		// Don't overwrite existing properties.
-		if (property in toStream) {
-			continue;
+;// CONCATENATED MODULE: ./node_modules/node-fetch/src/utils/is-redirect.js
+const redirectStatus = new Set([301, 302, 303, 307, 308]);
+
+/**
+ * Redirect code matching
+ *
+ * @param {number} code - Status code
+ * @return {boolean}
+ */
+const isRedirect = code => {
+	return redirectStatus.has(code);
+};
+
+;// CONCATENATED MODULE: ./node_modules/node-fetch/src/response.js
+/**
+ * Response.js
+ *
+ * Response class provides content decoding
+ */
+
+
+
+
+
+const response_INTERNALS = Symbol('Response internals');
+
+/**
+ * Response class
+ *
+ * Ref: https://fetch.spec.whatwg.org/#response-class
+ *
+ * @param   Stream  body  Readable stream
+ * @param   Object  opts  Response options
+ * @return  Void
+ */
+class Response extends Body {
+	constructor(body = null, options = {}) {
+		super(body, options);
+
+		// eslint-disable-next-line no-eq-null, eqeqeq, no-negated-condition
+		const status = options.status != null ? options.status : 200;
+
+		const headers = new Headers(options.headers);
+
+		if (body !== null && !headers.has('Content-Type')) {
+			const contentType = extractContentType(body, this);
+			if (contentType) {
+				headers.append('Content-Type', contentType);
+			}
 		}
 
-		properties[property] = {
-			get() {
-				const value = fromStream[property];
-				const isFunction = typeof value === 'function';
-
-				return isFunction ? value.bind(fromStream) : value;
-			},
-			set(value) {
-				fromStream[property] = value;
-			},
-			enumerable: true,
-			configurable: false,
+		this[response_INTERNALS] = {
+			type: 'default',
+			url: options.url,
+			status,
+			statusText: options.statusText || '',
+			headers,
+			counter: options.counter,
+			highWaterMark: options.highWaterMark
 		};
 	}
 
-	Object.defineProperties(toStream, properties);
+	get type() {
+		return this[response_INTERNALS].type;
+	}
 
-	fromStream.once('aborted', () => {
-		toStream.destroy();
+	get url() {
+		return this[response_INTERNALS].url || '';
+	}
 
-		toStream.emit('aborted');
-	});
+	get status() {
+		return this[response_INTERNALS].status;
+	}
 
-	fromStream.once('close', () => {
-		if (fromStream.complete) {
-			if (toStream.readable) {
-				toStream.once('end', () => {
-					toStream.emit('close');
-				});
-			} else {
-				toStream.emit('close');
-			}
-		} else {
-			toStream.emit('close');
+	/**
+	 * Convenience property representing if the request ended normally
+	 */
+	get ok() {
+		return this[response_INTERNALS].status >= 200 && this[response_INTERNALS].status < 300;
+	}
+
+	get redirected() {
+		return this[response_INTERNALS].counter > 0;
+	}
+
+	get statusText() {
+		return this[response_INTERNALS].statusText;
+	}
+
+	get headers() {
+		return this[response_INTERNALS].headers;
+	}
+
+	get highWaterMark() {
+		return this[response_INTERNALS].highWaterMark;
+	}
+
+	/**
+	 * Clone this response
+	 *
+	 * @return  Response
+	 */
+	clone() {
+		return new Response(clone(this, this.highWaterMark), {
+			type: this.type,
+			url: this.url,
+			status: this.status,
+			statusText: this.statusText,
+			headers: this.headers,
+			ok: this.ok,
+			redirected: this.redirected,
+			size: this.size,
+			highWaterMark: this.highWaterMark
+		});
+	}
+
+	/**
+	 * @param {string} url    The URL that the new response is to originate from.
+	 * @param {number} status An optional status code for the response (e.g., 302.)
+	 * @returns {Response}    A Response object.
+	 */
+	static redirect(url, status = 302) {
+		if (!isRedirect(status)) {
+			throw new RangeError('Failed to execute "redirect" on "response": Invalid status code');
 		}
-	});
 
-	return toStream;
+		return new Response(null, {
+			headers: {
+				location: new URL(url).toString()
+			},
+			status
+		});
+	}
+
+	static error() {
+		const response = new Response(null, {status: 0, statusText: ''});
+		response[response_INTERNALS].type = 'error';
+		return response;
+	}
+
+	static json(data = undefined, init = {}) {
+		const body = JSON.stringify(data);
+
+		if (body === undefined) {
+			throw new TypeError('data is not JSON serializable');
+		}
+
+		const headers = new Headers(init && init.headers);
+
+		if (!headers.has('content-type')) {
+			headers.set('content-type', 'application/json');
+		}
+
+		return new Response(body, {
+			...init,
+			headers
+		});
+	}
+
+	get [Symbol.toStringTag]() {
+		return 'Response';
+	}
 }
 
-;// CONCATENATED MODULE: ./node_modules/cacheable-request/dist/types.js
-// Type definitions for cacheable-request 6.0
-// Project: https://github.com/lukechilds/cacheable-request#readme
-// Definitions by: BendingBender <https://github.com/BendingBender>
-//                 Paul Melnikow <https://github.com/paulmelnikow>
-// Definitions: https://github.com/DefinitelyTyped/DefinitelyTyped
-// TypeScript Version: 2.3
-class types_RequestError extends Error {
-    constructor(error) {
-        super(error.message);
-        Object.assign(this, error);
-    }
-}
-class types_CacheError extends Error {
-    constructor(error) {
-        super(error.message);
-        Object.assign(this, error);
-    }
-}
-//# sourceMappingURL=types.js.map
-;// CONCATENATED MODULE: ./node_modules/cacheable-request/dist/index.js
-
-
-
-
-
-
-
-
-
-
-
-class CacheableRequest {
-    constructor(cacheRequest, cacheAdapter) {
-        this.hooks = new Map();
-        this.request = () => (options, cb) => {
-            let url;
-            if (typeof options === 'string') {
-                url = normalizeUrlObject(external_node_url_namespaceObject.parse(options));
-                options = {};
-            }
-            else if (options instanceof external_node_url_namespaceObject.URL) {
-                url = normalizeUrlObject(external_node_url_namespaceObject.parse(options.toString()));
-                options = {};
-            }
-            else {
-                const [pathname, ...searchParts] = (options.path ?? '').split('?');
-                const search = searchParts.length > 0
-                    ? `?${searchParts.join('?')}`
-                    : '';
-                url = normalizeUrlObject({ ...options, pathname, search });
-            }
-            options = {
-                headers: {},
-                method: 'GET',
-                cache: true,
-                strictTtl: false,
-                automaticFailover: false,
-                ...options,
-                ...urlObjectToRequestOptions(url),
-            };
-            options.headers = Object.fromEntries(entries(options.headers).map(([key, value]) => [key.toLowerCase(), value]));
-            const ee = new external_node_events_namespaceObject();
-            const normalizedUrlString = normalizeUrl(external_node_url_namespaceObject.format(url), {
-                stripWWW: false,
-                removeTrailingSlash: false,
-                stripAuthentication: false,
-            });
-            let key = `${options.method}:${normalizedUrlString}`;
-            // POST, PATCH, and PUT requests may be cached, depending on the response
-            // cache-control headers. As a result, the body of the request should be
-            // added to the cache key in order to avoid collisions.
-            if (options.body && options.method !== undefined && ['POST', 'PATCH', 'PUT'].includes(options.method)) {
-                if (options.body instanceof external_node_stream_namespaceObject.Readable) {
-                    // Streamed bodies should completely skip the cache because they may
-                    // or may not be hashable and in either case the stream would need to
-                    // close before the cache key could be generated.
-                    options.cache = false;
-                }
-                else {
-                    key += `:${external_node_crypto_namespaceObject.createHash('md5').update(options.body).digest('hex')}`;
-                }
-            }
-            let revalidate = false;
-            let madeRequest = false;
-            const makeRequest = (options_) => {
-                madeRequest = true;
-                let requestErrored = false;
-                let requestErrorCallback = () => { };
-                const requestErrorPromise = new Promise(resolve => {
-                    requestErrorCallback = () => {
-                        if (!requestErrored) {
-                            requestErrored = true;
-                            resolve();
-                        }
-                    };
-                });
-                const handler = async (response) => {
-                    if (revalidate) {
-                        response.status = response.statusCode;
-                        const revalidatedPolicy = http_cache_semantics.fromObject(revalidate.cachePolicy).revalidatedPolicy(options_, response);
-                        if (!revalidatedPolicy.modified) {
-                            response.resume();
-                            await new Promise(resolve => {
-                                // Skipping 'error' handler cause 'error' event should't be emitted for 304 response
-                                response
-                                    .once('end', resolve);
-                            });
-                            const headers = convertHeaders(revalidatedPolicy.policy.responseHeaders());
-                            response = new Response({ statusCode: revalidate.statusCode, headers, body: revalidate.body, url: revalidate.url });
-                            response.cachePolicy = revalidatedPolicy.policy;
-                            response.fromCache = true;
-                        }
-                    }
-                    if (!response.fromCache) {
-                        response.cachePolicy = new http_cache_semantics(options_, response, options_);
-                        response.fromCache = false;
-                    }
-                    let clonedResponse;
-                    if (options_.cache && response.cachePolicy.storable()) {
-                        clonedResponse = cloneResponse(response);
-                        (async () => {
-                            try {
-                                const bodyPromise = get_stream.buffer(response);
-                                await Promise.race([
-                                    requestErrorPromise,
-                                    new Promise(resolve => response.once('end', resolve)), // eslint-disable-line no-promise-executor-return
-                                ]);
-                                const body = await bodyPromise;
-                                let value = {
-                                    url: response.url,
-                                    statusCode: response.fromCache ? revalidate.statusCode : response.statusCode,
-                                    body,
-                                    cachePolicy: response.cachePolicy.toObject(),
-                                };
-                                let ttl = options_.strictTtl ? response.cachePolicy.timeToLive() : undefined;
-                                if (options_.maxTtl) {
-                                    ttl = ttl ? Math.min(ttl, options_.maxTtl) : options_.maxTtl;
-                                }
-                                if (this.hooks.size > 0) {
-                                    /* eslint-disable no-await-in-loop */
-                                    for (const key_ of this.hooks.keys()) {
-                                        value = await this.runHook(key_, value, response);
-                                    }
-                                    /* eslint-enable no-await-in-loop */
-                                }
-                                await this.cache.set(key, value, ttl);
-                            }
-                            catch (error) {
-                                ee.emit('error', new types_CacheError(error));
-                            }
-                        })();
-                    }
-                    else if (options_.cache && revalidate) {
-                        (async () => {
-                            try {
-                                await this.cache.delete(key);
-                            }
-                            catch (error) {
-                                ee.emit('error', new types_CacheError(error));
-                            }
-                        })();
-                    }
-                    ee.emit('response', clonedResponse ?? response);
-                    if (typeof cb === 'function') {
-                        cb(clonedResponse ?? response);
-                    }
-                };
-                try {
-                    const request_ = this.cacheRequest(options_, handler);
-                    request_.once('error', requestErrorCallback);
-                    request_.once('abort', requestErrorCallback);
-                    ee.emit('request', request_);
-                }
-                catch (error) {
-                    ee.emit('error', new types_RequestError(error));
-                }
-            };
-            (async () => {
-                const get = async (options_) => {
-                    await Promise.resolve();
-                    const cacheEntry = options_.cache ? await this.cache.get(key) : undefined;
-                    if (typeof cacheEntry === 'undefined' && !options_.forceRefresh) {
-                        makeRequest(options_);
-                        return;
-                    }
-                    const policy = http_cache_semantics.fromObject(cacheEntry.cachePolicy);
-                    if (policy.satisfiesWithoutRevalidation(options_) && !options_.forceRefresh) {
-                        const headers = convertHeaders(policy.responseHeaders());
-                        const response = new Response({ statusCode: cacheEntry.statusCode, headers, body: cacheEntry.body, url: cacheEntry.url });
-                        response.cachePolicy = policy;
-                        response.fromCache = true;
-                        ee.emit('response', response);
-                        if (typeof cb === 'function') {
-                            cb(response);
-                        }
-                    }
-                    else if (policy.satisfiesWithoutRevalidation(options_) && Date.now() >= policy.timeToLive() && options_.forceRefresh) {
-                        await this.cache.delete(key);
-                        options_.headers = policy.revalidationHeaders(options_);
-                        makeRequest(options_);
-                    }
-                    else {
-                        revalidate = cacheEntry;
-                        options_.headers = policy.revalidationHeaders(options_);
-                        makeRequest(options_);
-                    }
-                };
-                const errorHandler = (error) => ee.emit('error', new types_CacheError(error));
-                if (this.cache instanceof src) {
-                    const cachek = this.cache;
-                    cachek.once('error', errorHandler);
-                    ee.on('error', () => cachek.removeListener('error', errorHandler));
-                }
-                try {
-                    await get(options);
-                }
-                catch (error) {
-                    if (options.automaticFailover && !madeRequest) {
-                        makeRequest(options);
-                    }
-                    ee.emit('error', new types_CacheError(error));
-                }
-            })();
-            return ee;
-        };
-        this.addHook = (name, fn) => {
-            if (!this.hooks.has(name)) {
-                this.hooks.set(name, fn);
-            }
-        };
-        this.removeHook = (name) => this.hooks.delete(name);
-        this.getHook = (name) => this.hooks.get(name);
-        this.runHook = async (name, ...args) => this.hooks.get(name)?.(...args);
-        if (cacheAdapter instanceof src) {
-            this.cache = cacheAdapter;
-        }
-        else if (typeof cacheAdapter === 'string') {
-            this.cache = new src({
-                uri: cacheAdapter,
-                namespace: 'cacheable-request',
-            });
-        }
-        else {
-            this.cache = new src({
-                store: cacheAdapter,
-                namespace: 'cacheable-request',
-            });
-        }
-        this.request = this.request.bind(this);
-        this.cacheRequest = cacheRequest;
-    }
-}
-const entries = Object.entries;
-const cloneResponse = (response) => {
-    const clone = new external_node_stream_namespaceObject.PassThrough({ autoDestroy: false });
-    mimicResponse(response, clone);
-    return response.pipe(clone);
-};
-const urlObjectToRequestOptions = (url) => {
-    const options = { ...url };
-    options.path = `${url.pathname || '/'}${url.search || ''}`;
-    delete options.pathname;
-    delete options.search;
-    return options;
-};
-const normalizeUrlObject = (url) => 
-// If url was parsed by url.parse or new URL:
-// - hostname will be set
-// - host will be hostname[:port]
-// - port will be set if it was explicit in the parsed string
-// Otherwise, url was from request options:
-// - hostname or host may be set
-// - host shall not have port encoded
-({
-    protocol: url.protocol,
-    auth: url.auth,
-    hostname: url.hostname || url.host || 'localhost',
-    port: url.port,
-    pathname: url.pathname,
-    search: url.search,
-});
-const convertHeaders = (headers) => {
-    const result = [];
-    for (const name of Object.keys(headers)) {
-        result[name.toLowerCase()] = headers[name];
-    }
-    return result;
-};
-/* harmony default export */ const cacheable_request_dist = (CacheableRequest);
-
-const onResponse = 'onResponse';
-//# sourceMappingURL=index.js.map
-// EXTERNAL MODULE: ./node_modules/decompress-response/index.js
-var decompress_response = __nccwpck_require__(2391);
-;// CONCATENATED MODULE: ./node_modules/form-data-encoder/lib/util/isFunction.js
-const isFunction = (value) => (typeof value === "function");
-
-;// CONCATENATED MODULE: ./node_modules/form-data-encoder/lib/util/isFormData.js
-
-const isFormData = (value) => Boolean(value
-    && isFunction(value.constructor)
-    && value[Symbol.toStringTag] === "FormData"
-    && isFunction(value.append)
-    && isFunction(value.getAll)
-    && isFunction(value.entries)
-    && isFunction(value[Symbol.iterator]));
-
-;// CONCATENATED MODULE: ./node_modules/form-data-encoder/lib/util/createBoundary.js
-const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789";
-function createBoundary() {
-    let size = 16;
-    let res = "";
-    while (size--) {
-        res += alphabet[(Math.random() * alphabet.length) << 0];
-    }
-    return res;
-}
-
-;// CONCATENATED MODULE: ./node_modules/form-data-encoder/lib/util/normalizeValue.js
-const normalizeValue = (value) => String(value)
-    .replace(/\r|\n/g, (match, i, str) => {
-    if ((match === "\r" && str[i + 1] !== "\n")
-        || (match === "\n" && str[i - 1] !== "\r")) {
-        return "\r\n";
-    }
-    return match;
+Object.defineProperties(Response.prototype, {
+	type: {enumerable: true},
+	url: {enumerable: true},
+	status: {enumerable: true},
+	ok: {enumerable: true},
+	redirected: {enumerable: true},
+	statusText: {enumerable: true},
+	headers: {enumerable: true},
+	clone: {enumerable: true}
 });
 
-;// CONCATENATED MODULE: ./node_modules/form-data-encoder/lib/util/isPlainObject.js
-const getType = (value) => (Object.prototype.toString.call(value).slice(8, -1).toLowerCase());
-function isPlainObject(value) {
-    if (getType(value) !== "object") {
-        return false;
-    }
-    const pp = Object.getPrototypeOf(value);
-    if (pp === null || pp === undefined) {
-        return true;
-    }
-    const Ctor = pp.constructor && pp.constructor.toString();
-    return Ctor === Object.toString();
-}
+;// CONCATENATED MODULE: external "node:url"
+const external_node_url_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:url");
+;// CONCATENATED MODULE: ./node_modules/node-fetch/src/utils/get-search.js
+const getSearch = parsedURL => {
+	if (parsedURL.search) {
+		return parsedURL.search;
+	}
 
-;// CONCATENATED MODULE: ./node_modules/form-data-encoder/lib/util/proxyHeaders.js
-function getProperty(target, prop) {
-    if (typeof prop === "string") {
-        for (const [name, value] of Object.entries(target)) {
-            if (prop.toLowerCase() === name.toLowerCase()) {
-                return value;
-            }
-        }
-    }
-    return undefined;
-}
-const proxyHeaders = (object) => new Proxy(object, {
-    get: (target, prop) => getProperty(target, prop),
-    has: (target, prop) => getProperty(target, prop) !== undefined
-});
-
-;// CONCATENATED MODULE: ./node_modules/form-data-encoder/lib/util/escapeName.js
-const escapeName = (name) => String(name)
-    .replace(/\r/g, "%0D")
-    .replace(/\n/g, "%0A")
-    .replace(/"/g, "%22");
-
-;// CONCATENATED MODULE: ./node_modules/form-data-encoder/lib/util/isFile.js
-
-const isFile = (value) => Boolean(value
-    && typeof value === "object"
-    && isFunction(value.constructor)
-    && value[Symbol.toStringTag] === "File"
-    && isFunction(value.stream)
-    && value.name != null);
-const isFileLike = (/* unused pure expression or super */ null && (isFile));
-
-;// CONCATENATED MODULE: ./node_modules/form-data-encoder/lib/FormDataEncoder.js
-var __classPrivateFieldSet = (undefined && undefined.__classPrivateFieldSet) || function (receiver, state, value, kind, f) {
-    if (kind === "m") throw new TypeError("Private method is not writable");
-    if (kind === "a" && !f) throw new TypeError("Private accessor was defined without a setter");
-    if (typeof state === "function" ? receiver !== state || !f : !state.has(receiver)) throw new TypeError("Cannot write private member to an object whose class did not declare it");
-    return (kind === "a" ? f.call(receiver, value) : f ? f.value = value : state.set(receiver, value)), value;
+	const lastOffset = parsedURL.href.length - 1;
+	const hash = parsedURL.hash || (parsedURL.href[lastOffset] === '#' ? '#' : '');
+	return parsedURL.href[lastOffset - hash.length] === '?' ? '?' : '';
 };
-var __classPrivateFieldGet = (undefined && undefined.__classPrivateFieldGet) || function (receiver, state, kind, f) {
-    if (kind === "a" && !f) throw new TypeError("Private accessor was defined without a getter");
-    if (typeof state === "function" ? receiver !== state || !f : !state.has(receiver)) throw new TypeError("Cannot read private member from an object whose class did not declare it");
-    return kind === "m" ? f : kind === "a" ? f.call(receiver) : f ? f.value : state.get(receiver);
-};
-var _FormDataEncoder_instances, _FormDataEncoder_CRLF, _FormDataEncoder_CRLF_BYTES, _FormDataEncoder_CRLF_BYTES_LENGTH, _FormDataEncoder_DASHES, _FormDataEncoder_encoder, _FormDataEncoder_footer, _FormDataEncoder_form, _FormDataEncoder_options, _FormDataEncoder_getFieldHeader, _FormDataEncoder_getContentLength;
-
-
-
-
-
-
-
-const defaultOptions = {
-    enableAdditionalHeaders: false
-};
-const readonlyProp = { writable: false, configurable: false };
-class FormDataEncoder {
-    constructor(form, boundaryOrOptions, options) {
-        _FormDataEncoder_instances.add(this);
-        _FormDataEncoder_CRLF.set(this, "\r\n");
-        _FormDataEncoder_CRLF_BYTES.set(this, void 0);
-        _FormDataEncoder_CRLF_BYTES_LENGTH.set(this, void 0);
-        _FormDataEncoder_DASHES.set(this, "-".repeat(2));
-        _FormDataEncoder_encoder.set(this, new TextEncoder());
-        _FormDataEncoder_footer.set(this, void 0);
-        _FormDataEncoder_form.set(this, void 0);
-        _FormDataEncoder_options.set(this, void 0);
-        if (!isFormData(form)) {
-            throw new TypeError("Expected first argument to be a FormData instance.");
-        }
-        let boundary;
-        if (isPlainObject(boundaryOrOptions)) {
-            options = boundaryOrOptions;
-        }
-        else {
-            boundary = boundaryOrOptions;
-        }
-        if (!boundary) {
-            boundary = createBoundary();
-        }
-        if (typeof boundary !== "string") {
-            throw new TypeError("Expected boundary argument to be a string.");
-        }
-        if (options && !isPlainObject(options)) {
-            throw new TypeError("Expected options argument to be an object.");
-        }
-        __classPrivateFieldSet(this, _FormDataEncoder_form, Array.from(form.entries()), "f");
-        __classPrivateFieldSet(this, _FormDataEncoder_options, { ...defaultOptions, ...options }, "f");
-        __classPrivateFieldSet(this, _FormDataEncoder_CRLF_BYTES, __classPrivateFieldGet(this, _FormDataEncoder_encoder, "f").encode(__classPrivateFieldGet(this, _FormDataEncoder_CRLF, "f")), "f");
-        __classPrivateFieldSet(this, _FormDataEncoder_CRLF_BYTES_LENGTH, __classPrivateFieldGet(this, _FormDataEncoder_CRLF_BYTES, "f").byteLength, "f");
-        this.boundary = `form-data-boundary-${boundary}`;
-        this.contentType = `multipart/form-data; boundary=${this.boundary}`;
-        __classPrivateFieldSet(this, _FormDataEncoder_footer, __classPrivateFieldGet(this, _FormDataEncoder_encoder, "f").encode(`${__classPrivateFieldGet(this, _FormDataEncoder_DASHES, "f")}${this.boundary}${__classPrivateFieldGet(this, _FormDataEncoder_DASHES, "f")}${__classPrivateFieldGet(this, _FormDataEncoder_CRLF, "f").repeat(2)}`), "f");
-        const headers = {
-            "Content-Type": this.contentType
-        };
-        const contentLength = __classPrivateFieldGet(this, _FormDataEncoder_instances, "m", _FormDataEncoder_getContentLength).call(this);
-        if (contentLength) {
-            this.contentLength = contentLength;
-            headers["Content-Length"] = contentLength;
-        }
-        this.headers = proxyHeaders(Object.freeze(headers));
-        Object.defineProperties(this, {
-            boundary: readonlyProp,
-            contentType: readonlyProp,
-            contentLength: readonlyProp,
-            headers: readonlyProp
-        });
-    }
-    getContentLength() {
-        return this.contentLength == null ? undefined : Number(this.contentLength);
-    }
-    *values() {
-        for (const [name, raw] of __classPrivateFieldGet(this, _FormDataEncoder_form, "f")) {
-            const value = isFile(raw) ? raw : __classPrivateFieldGet(this, _FormDataEncoder_encoder, "f").encode(normalizeValue(raw));
-            yield __classPrivateFieldGet(this, _FormDataEncoder_instances, "m", _FormDataEncoder_getFieldHeader).call(this, name, value);
-            yield value;
-            yield __classPrivateFieldGet(this, _FormDataEncoder_CRLF_BYTES, "f");
-        }
-        yield __classPrivateFieldGet(this, _FormDataEncoder_footer, "f");
-    }
-    async *encode() {
-        for (const part of this.values()) {
-            if (isFile(part)) {
-                yield* part.stream();
-            }
-            else {
-                yield part;
-            }
-        }
-    }
-    [(_FormDataEncoder_CRLF = new WeakMap(), _FormDataEncoder_CRLF_BYTES = new WeakMap(), _FormDataEncoder_CRLF_BYTES_LENGTH = new WeakMap(), _FormDataEncoder_DASHES = new WeakMap(), _FormDataEncoder_encoder = new WeakMap(), _FormDataEncoder_footer = new WeakMap(), _FormDataEncoder_form = new WeakMap(), _FormDataEncoder_options = new WeakMap(), _FormDataEncoder_instances = new WeakSet(), _FormDataEncoder_getFieldHeader = function _FormDataEncoder_getFieldHeader(name, value) {
-        let header = "";
-        header += `${__classPrivateFieldGet(this, _FormDataEncoder_DASHES, "f")}${this.boundary}${__classPrivateFieldGet(this, _FormDataEncoder_CRLF, "f")}`;
-        header += `Content-Disposition: form-data; name="${escapeName(name)}"`;
-        if (isFile(value)) {
-            header += `; filename="${escapeName(value.name)}"${__classPrivateFieldGet(this, _FormDataEncoder_CRLF, "f")}`;
-            header += `Content-Type: ${value.type || "application/octet-stream"}`;
-        }
-        const size = isFile(value) ? value.size : value.byteLength;
-        if (__classPrivateFieldGet(this, _FormDataEncoder_options, "f").enableAdditionalHeaders === true
-            && size != null
-            && !isNaN(size)) {
-            header += `${__classPrivateFieldGet(this, _FormDataEncoder_CRLF, "f")}Content-Length: ${isFile(value) ? value.size : value.byteLength}`;
-        }
-        return __classPrivateFieldGet(this, _FormDataEncoder_encoder, "f").encode(`${header}${__classPrivateFieldGet(this, _FormDataEncoder_CRLF, "f").repeat(2)}`);
-    }, _FormDataEncoder_getContentLength = function _FormDataEncoder_getContentLength() {
-        let length = 0;
-        for (const [name, raw] of __classPrivateFieldGet(this, _FormDataEncoder_form, "f")) {
-            const value = isFile(raw) ? raw : __classPrivateFieldGet(this, _FormDataEncoder_encoder, "f").encode(normalizeValue(raw));
-            const size = isFile(value) ? value.size : value.byteLength;
-            if (size == null || isNaN(size)) {
-                return undefined;
-            }
-            length += __classPrivateFieldGet(this, _FormDataEncoder_instances, "m", _FormDataEncoder_getFieldHeader).call(this, name, value).byteLength;
-            length += size;
-            length += __classPrivateFieldGet(this, _FormDataEncoder_CRLF_BYTES_LENGTH, "f");
-        }
-        return String(length + __classPrivateFieldGet(this, _FormDataEncoder_footer, "f").byteLength);
-    }, Symbol.iterator)]() {
-        return this.values();
-    }
-    [Symbol.asyncIterator]() {
-        return this.encode();
-    }
-}
-
-;// CONCATENATED MODULE: external "node:util"
-const external_node_util_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:util");
-;// CONCATENATED MODULE: ./node_modules/got/dist/source/core/utils/is-form-data.js
-
-function is_form_data_isFormData(body) {
-    return dist.nodeStream(body) && dist.function_(body.getBoundary);
-}
-
-;// CONCATENATED MODULE: ./node_modules/got/dist/source/core/utils/get-body-size.js
-
-
-
-
-async function getBodySize(body, headers) {
-    if (headers && 'content-length' in headers) {
-        return Number(headers['content-length']);
-    }
-    if (!body) {
-        return 0;
-    }
-    if (dist.string(body)) {
-        return external_node_buffer_namespaceObject.Buffer.byteLength(body);
-    }
-    if (dist.buffer(body)) {
-        return body.length;
-    }
-    if (is_form_data_isFormData(body)) {
-        return (0,external_node_util_namespaceObject.promisify)(body.getLength.bind(body))();
-    }
-    return undefined;
-}
-
-;// CONCATENATED MODULE: ./node_modules/got/dist/source/core/utils/proxy-events.js
-function proxyEvents(from, to, events) {
-    const eventFunctions = {};
-    for (const event of events) {
-        const eventFunction = (...args) => {
-            to.emit(event, ...args);
-        };
-        eventFunctions[event] = eventFunction;
-        from.on(event, eventFunction);
-    }
-    return () => {
-        for (const [event, eventFunction] of Object.entries(eventFunctions)) {
-            from.off(event, eventFunction);
-        }
-    };
-}
 
 ;// CONCATENATED MODULE: external "node:net"
 const external_node_net_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:net");
-;// CONCATENATED MODULE: ./node_modules/got/dist/source/core/utils/unhandle.js
-// When attaching listeners, it's very easy to forget about them.
-// Especially if you do error handling and set timeouts.
-// So instead of checking if it's proper to throw an error on every timeout ever,
-// use this simple tool which will remove all listeners you have attached.
-function unhandle() {
-    const handlers = [];
-    return {
-        once(origin, event, fn) {
-            origin.once(event, fn);
-            handlers.push({ origin, event, fn });
-        },
-        unhandleAll() {
-            for (const handler of handlers) {
-                const { origin, event, fn } = handler;
-                origin.removeListener(event, fn);
-            }
-            handlers.length = 0;
-        },
-    };
-}
-
-;// CONCATENATED MODULE: ./node_modules/got/dist/source/core/timed-out.js
+;// CONCATENATED MODULE: ./node_modules/node-fetch/src/utils/referrer.js
 
 
-const reentry = Symbol('reentry');
-const noop = () => { };
-class timed_out_TimeoutError extends Error {
-    constructor(threshold, event) {
-        super(`Timeout awaiting '${event}' for ${threshold}ms`);
-        Object.defineProperty(this, "event", {
-            enumerable: true,
-            configurable: true,
-            writable: true,
-            value: event
-        });
-        Object.defineProperty(this, "code", {
-            enumerable: true,
-            configurable: true,
-            writable: true,
-            value: void 0
-        });
-        this.name = 'TimeoutError';
-        this.code = 'ETIMEDOUT';
-    }
-}
-function timedOut(request, delays, options) {
-    if (reentry in request) {
-        return noop;
-    }
-    request[reentry] = true;
-    const cancelers = [];
-    const { once, unhandleAll } = unhandle();
-    const addTimeout = (delay, callback, event) => {
-        const timeout = setTimeout(callback, delay, delay, event);
-        timeout.unref?.();
-        const cancel = () => {
-            clearTimeout(timeout);
-        };
-        cancelers.push(cancel);
-        return cancel;
-    };
-    const { host, hostname } = options;
-    const timeoutHandler = (delay, event) => {
-        request.destroy(new timed_out_TimeoutError(delay, event));
-    };
-    const cancelTimeouts = () => {
-        for (const cancel of cancelers) {
-            cancel();
-        }
-        unhandleAll();
-    };
-    request.once('error', error => {
-        cancelTimeouts();
-        // Save original behavior
-        /* istanbul ignore next */
-        if (request.listenerCount('error') === 0) {
-            throw error;
-        }
-    });
-    if (typeof delays.request !== 'undefined') {
-        const cancelTimeout = addTimeout(delays.request, timeoutHandler, 'request');
-        once(request, 'response', (response) => {
-            once(response, 'end', cancelTimeout);
-        });
-    }
-    if (typeof delays.socket !== 'undefined') {
-        const { socket } = delays;
-        const socketTimeoutHandler = () => {
-            timeoutHandler(socket, 'socket');
-        };
-        request.setTimeout(socket, socketTimeoutHandler);
-        // `request.setTimeout(0)` causes a memory leak.
-        // We can just remove the listener and forget about the timer - it's unreffed.
-        // See https://github.com/sindresorhus/got/issues/690
-        cancelers.push(() => {
-            request.removeListener('timeout', socketTimeoutHandler);
-        });
-    }
-    const hasLookup = typeof delays.lookup !== 'undefined';
-    const hasConnect = typeof delays.connect !== 'undefined';
-    const hasSecureConnect = typeof delays.secureConnect !== 'undefined';
-    const hasSend = typeof delays.send !== 'undefined';
-    if (hasLookup || hasConnect || hasSecureConnect || hasSend) {
-        once(request, 'socket', (socket) => {
-            const { socketPath } = request;
-            /* istanbul ignore next: hard to test */
-            if (socket.connecting) {
-                const hasPath = Boolean(socketPath ?? external_node_net_namespaceObject.isIP(hostname ?? host ?? '') !== 0);
-                if (hasLookup && !hasPath && typeof socket.address().address === 'undefined') {
-                    const cancelTimeout = addTimeout(delays.lookup, timeoutHandler, 'lookup');
-                    once(socket, 'lookup', cancelTimeout);
-                }
-                if (hasConnect) {
-                    const timeConnect = () => addTimeout(delays.connect, timeoutHandler, 'connect');
-                    if (hasPath) {
-                        once(socket, 'connect', timeConnect());
-                    }
-                    else {
-                        once(socket, 'lookup', (error) => {
-                            if (error === null) {
-                                once(socket, 'connect', timeConnect());
-                            }
-                        });
-                    }
-                }
-                if (hasSecureConnect && options.protocol === 'https:') {
-                    once(socket, 'connect', () => {
-                        const cancelTimeout = addTimeout(delays.secureConnect, timeoutHandler, 'secureConnect');
-                        once(socket, 'secureConnect', cancelTimeout);
-                    });
-                }
-            }
-            if (hasSend) {
-                const timeRequest = () => addTimeout(delays.send, timeoutHandler, 'send');
-                /* istanbul ignore next: hard to test */
-                if (socket.connecting) {
-                    once(socket, 'connect', () => {
-                        once(request, 'upload-complete', timeRequest());
-                    });
-                }
-                else {
-                    once(request, 'upload-complete', timeRequest());
-                }
-            }
-        });
-    }
-    if (typeof delays.response !== 'undefined') {
-        once(request, 'upload-complete', () => {
-            const cancelTimeout = addTimeout(delays.response, timeoutHandler, 'response');
-            once(request, 'response', cancelTimeout);
-        });
-    }
-    if (typeof delays.read !== 'undefined') {
-        once(request, 'response', (response) => {
-            const cancelTimeout = addTimeout(delays.read, timeoutHandler, 'read');
-            once(response, 'end', cancelTimeout);
-        });
-    }
-    return cancelTimeouts;
-}
+/**
+ * @external URL
+ * @see {@link https://developer.mozilla.org/en-US/docs/Web/API/URL|URL}
+ */
 
-;// CONCATENATED MODULE: ./node_modules/got/dist/source/core/utils/url-to-options.js
+/**
+ * @module utils/referrer
+ * @private
+ */
 
-function urlToOptions(url) {
-    // Cast to URL
-    url = url;
-    const options = {
-        protocol: url.protocol,
-        hostname: dist.string(url.hostname) && url.hostname.startsWith('[') ? url.hostname.slice(1, -1) : url.hostname,
-        host: url.host,
-        hash: url.hash,
-        search: url.search,
-        pathname: url.pathname,
-        href: url.href,
-        path: `${url.pathname || ''}${url.search || ''}`,
-    };
-    if (dist.string(url.port) && url.port.length > 0) {
-        options.port = Number(url.port);
-    }
-    if (url.username || url.password) {
-        options.auth = `${url.username || ''}:${url.password || ''}`;
-    }
-    return options;
-}
-
-;// CONCATENATED MODULE: ./node_modules/got/dist/source/core/utils/weakable-map.js
-class WeakableMap {
-    constructor() {
-        Object.defineProperty(this, "weakMap", {
-            enumerable: true,
-            configurable: true,
-            writable: true,
-            value: void 0
-        });
-        Object.defineProperty(this, "map", {
-            enumerable: true,
-            configurable: true,
-            writable: true,
-            value: void 0
-        });
-        this.weakMap = new WeakMap();
-        this.map = new Map();
-    }
-    set(key, value) {
-        if (typeof key === 'object') {
-            this.weakMap.set(key, value);
-        }
-        else {
-            this.map.set(key, value);
-        }
-    }
-    get(key) {
-        if (typeof key === 'object') {
-            return this.weakMap.get(key);
-        }
-        return this.map.get(key);
-    }
-    has(key) {
-        if (typeof key === 'object') {
-            return this.weakMap.has(key);
-        }
-        return this.map.has(key);
-    }
-}
-
-;// CONCATENATED MODULE: ./node_modules/got/dist/source/core/calculate-retry-delay.js
-const calculateRetryDelay = ({ attemptCount, retryOptions, error, retryAfter, computedValue, }) => {
-    if (error.name === 'RetryError') {
-        return 1;
-    }
-    if (attemptCount > retryOptions.limit) {
-        return 0;
-    }
-    const hasMethod = retryOptions.methods.includes(error.options.method);
-    const hasErrorCode = retryOptions.errorCodes.includes(error.code);
-    const hasStatusCode = error.response && retryOptions.statusCodes.includes(error.response.statusCode);
-    if (!hasMethod || (!hasErrorCode && !hasStatusCode)) {
-        return 0;
-    }
-    if (error.response) {
-        if (retryAfter) {
-            // In this case `computedValue` is `options.request.timeout`
-            if (retryAfter > computedValue) {
-                return 0;
-            }
-            return retryAfter;
-        }
-        if (error.response.statusCode === 413) {
-            return 0;
-        }
-    }
-    const noise = Math.random() * retryOptions.noise;
-    return Math.min(((2 ** (attemptCount - 1)) * 1000), retryOptions.backoffLimit) + noise;
-};
-/* harmony default export */ const calculate_retry_delay = (calculateRetryDelay);
-
-;// CONCATENATED MODULE: external "node:tls"
-const external_node_tls_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:tls");
-;// CONCATENATED MODULE: external "node:https"
-const external_node_https_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:https");
-;// CONCATENATED MODULE: external "node:dns"
-const external_node_dns_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:dns");
-;// CONCATENATED MODULE: external "node:os"
-const external_node_os_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:os");
-;// CONCATENATED MODULE: ./node_modules/cacheable-lookup/source/index.js
-
-
-
-
-const {Resolver: AsyncResolver} = external_node_dns_namespaceObject.promises;
-
-const kCacheableLookupCreateConnection = Symbol('cacheableLookupCreateConnection');
-const kCacheableLookupInstance = Symbol('cacheableLookupInstance');
-const kExpires = Symbol('expires');
-
-const supportsALL = typeof external_node_dns_namespaceObject.ALL === 'number';
-
-const verifyAgent = agent => {
-	if (!(agent && typeof agent.createConnection === 'function')) {
-		throw new Error('Expected an Agent instance as the first argument');
-	}
-};
-
-const map4to6 = entries => {
-	for (const entry of entries) {
-		if (entry.family === 6) {
-			continue;
-		}
-
-		entry.address = `::ffff:${entry.address}`;
-		entry.family = 6;
-	}
-};
-
-const getIfaceInfo = () => {
-	let has4 = false;
-	let has6 = false;
-
-	for (const device of Object.values(external_node_os_namespaceObject.networkInterfaces())) {
-		for (const iface of device) {
-			if (iface.internal) {
-				continue;
-			}
-
-			if (iface.family === 'IPv6') {
-				has6 = true;
-			} else {
-				has4 = true;
-			}
-
-			if (has4 && has6) {
-				return {has4, has6};
-			}
-		}
+/**
+ * @see {@link https://w3c.github.io/webappsec-referrer-policy/#strip-url|Referrer Policy §8.4. Strip url for use as a referrer}
+ * @param {string} URL
+ * @param {boolean} [originOnly=false]
+ */
+function stripURLForUseAsAReferrer(url, originOnly = false) {
+	// 1. If url is null, return no referrer.
+	if (url == null) { // eslint-disable-line no-eq-null, eqeqeq
+		return 'no-referrer';
 	}
 
-	return {has4, has6};
-};
+	url = new URL(url);
 
-const isIterable = map => {
-	return Symbol.iterator in map;
-};
+	// 2. If url's scheme is a local scheme, then return no referrer.
+	if (/^(about|blob|data):$/.test(url.protocol)) {
+		return 'no-referrer';
+	}
 
-const ignoreNoResultErrors = dnsPromise => {
-	return dnsPromise.catch(error => {
-		if (
-			error.code === 'ENODATA' ||
-			error.code === 'ENOTFOUND' ||
-			error.code === 'ENOENT' // Windows: name exists, but not this record type
-		) {
-			return [];
+	// 3. Set url's username to the empty string.
+	url.username = '';
+
+	// 4. Set url's password to null.
+	// Note: `null` appears to be a mistake as this actually results in the password being `"null"`.
+	url.password = '';
+
+	// 5. Set url's fragment to null.
+	// Note: `null` appears to be a mistake as this actually results in the fragment being `"#null"`.
+	url.hash = '';
+
+	// 6. If the origin-only flag is true, then:
+	if (originOnly) {
+		// 6.1. Set url's path to null.
+		// Note: `null` appears to be a mistake as this actually results in the path being `"/null"`.
+		url.pathname = '';
+
+		// 6.2. Set url's query to null.
+		// Note: `null` appears to be a mistake as this actually results in the query being `"?null"`.
+		url.search = '';
+	}
+
+	// 7. Return url.
+	return url;
+}
+
+/**
+ * @see {@link https://w3c.github.io/webappsec-referrer-policy/#enumdef-referrerpolicy|enum ReferrerPolicy}
+ */
+const ReferrerPolicy = new Set([
+	'',
+	'no-referrer',
+	'no-referrer-when-downgrade',
+	'same-origin',
+	'origin',
+	'strict-origin',
+	'origin-when-cross-origin',
+	'strict-origin-when-cross-origin',
+	'unsafe-url'
+]);
+
+/**
+ * @see {@link https://w3c.github.io/webappsec-referrer-policy/#default-referrer-policy|default referrer policy}
+ */
+const DEFAULT_REFERRER_POLICY = 'strict-origin-when-cross-origin';
+
+/**
+ * @see {@link https://w3c.github.io/webappsec-referrer-policy/#referrer-policies|Referrer Policy §3. Referrer Policies}
+ * @param {string} referrerPolicy
+ * @returns {string} referrerPolicy
+ */
+function validateReferrerPolicy(referrerPolicy) {
+	if (!ReferrerPolicy.has(referrerPolicy)) {
+		throw new TypeError(`Invalid referrerPolicy: ${referrerPolicy}`);
+	}
+
+	return referrerPolicy;
+}
+
+/**
+ * @see {@link https://w3c.github.io/webappsec-secure-contexts/#is-origin-trustworthy|Referrer Policy §3.2. Is origin potentially trustworthy?}
+ * @param {external:URL} url
+ * @returns `true`: "Potentially Trustworthy", `false`: "Not Trustworthy"
+ */
+function isOriginPotentiallyTrustworthy(url) {
+	// 1. If origin is an opaque origin, return "Not Trustworthy".
+	// Not applicable
+
+	// 2. Assert: origin is a tuple origin.
+	// Not for implementations
+
+	// 3. If origin's scheme is either "https" or "wss", return "Potentially Trustworthy".
+	if (/^(http|ws)s:$/.test(url.protocol)) {
+		return true;
+	}
+
+	// 4. If origin's host component matches one of the CIDR notations 127.0.0.0/8 or ::1/128 [RFC4632], return "Potentially Trustworthy".
+	const hostIp = url.host.replace(/(^\[)|(]$)/g, '');
+	const hostIPVersion = (0,external_node_net_namespaceObject.isIP)(hostIp);
+
+	if (hostIPVersion === 4 && /^127\./.test(hostIp)) {
+		return true;
+	}
+
+	if (hostIPVersion === 6 && /^(((0+:){7})|(::(0+:){0,6}))0*1$/.test(hostIp)) {
+		return true;
+	}
+
+	// 5. If origin's host component is "localhost" or falls within ".localhost", and the user agent conforms to the name resolution rules in [let-localhost-be-localhost], return "Potentially Trustworthy".
+	// We are returning FALSE here because we cannot ensure conformance to
+	// let-localhost-be-loalhost (https://tools.ietf.org/html/draft-west-let-localhost-be-localhost)
+	if (url.host === 'localhost' || url.host.endsWith('.localhost')) {
+		return false;
+	}
+
+	// 6. If origin's scheme component is file, return "Potentially Trustworthy".
+	if (url.protocol === 'file:') {
+		return true;
+	}
+
+	// 7. If origin's scheme component is one which the user agent considers to be authenticated, return "Potentially Trustworthy".
+	// Not supported
+
+	// 8. If origin has been configured as a trustworthy origin, return "Potentially Trustworthy".
+	// Not supported
+
+	// 9. Return "Not Trustworthy".
+	return false;
+}
+
+/**
+ * @see {@link https://w3c.github.io/webappsec-secure-contexts/#is-url-trustworthy|Referrer Policy §3.3. Is url potentially trustworthy?}
+ * @param {external:URL} url
+ * @returns `true`: "Potentially Trustworthy", `false`: "Not Trustworthy"
+ */
+function isUrlPotentiallyTrustworthy(url) {
+	// 1. If url is "about:blank" or "about:srcdoc", return "Potentially Trustworthy".
+	if (/^about:(blank|srcdoc)$/.test(url)) {
+		return true;
+	}
+
+	// 2. If url's scheme is "data", return "Potentially Trustworthy".
+	if (url.protocol === 'data:') {
+		return true;
+	}
+
+	// Note: The origin of blob: and filesystem: URLs is the origin of the context in which they were
+	// created. Therefore, blobs created in a trustworthy origin will themselves be potentially
+	// trustworthy.
+	if (/^(blob|filesystem):$/.test(url.protocol)) {
+		return true;
+	}
+
+	// 3. Return the result of executing §3.2 Is origin potentially trustworthy? on url's origin.
+	return isOriginPotentiallyTrustworthy(url);
+}
+
+/**
+ * Modifies the referrerURL to enforce any extra security policy considerations.
+ * @see {@link https://w3c.github.io/webappsec-referrer-policy/#determine-requests-referrer|Referrer Policy §8.3. Determine request's Referrer}, step 7
+ * @callback module:utils/referrer~referrerURLCallback
+ * @param {external:URL} referrerURL
+ * @returns {external:URL} modified referrerURL
+ */
+
+/**
+ * Modifies the referrerOrigin to enforce any extra security policy considerations.
+ * @see {@link https://w3c.github.io/webappsec-referrer-policy/#determine-requests-referrer|Referrer Policy §8.3. Determine request's Referrer}, step 7
+ * @callback module:utils/referrer~referrerOriginCallback
+ * @param {external:URL} referrerOrigin
+ * @returns {external:URL} modified referrerOrigin
+ */
+
+/**
+ * @see {@link https://w3c.github.io/webappsec-referrer-policy/#determine-requests-referrer|Referrer Policy §8.3. Determine request's Referrer}
+ * @param {Request} request
+ * @param {object} o
+ * @param {module:utils/referrer~referrerURLCallback} o.referrerURLCallback
+ * @param {module:utils/referrer~referrerOriginCallback} o.referrerOriginCallback
+ * @returns {external:URL} Request's referrer
+ */
+function determineRequestsReferrer(request, {referrerURLCallback, referrerOriginCallback} = {}) {
+	// There are 2 notes in the specification about invalid pre-conditions.  We return null, here, for
+	// these cases:
+	// > Note: If request's referrer is "no-referrer", Fetch will not call into this algorithm.
+	// > Note: If request's referrer policy is the empty string, Fetch will not call into this
+	// > algorithm.
+	if (request.referrer === 'no-referrer' || request.referrerPolicy === '') {
+		return null;
+	}
+
+	// 1. Let policy be request's associated referrer policy.
+	const policy = request.referrerPolicy;
+
+	// 2. Let environment be request's client.
+	// not applicable to node.js
+
+	// 3. Switch on request's referrer:
+	if (request.referrer === 'about:client') {
+		return 'no-referrer';
+	}
+
+	// "a URL": Let referrerSource be request's referrer.
+	const referrerSource = request.referrer;
+
+	// 4. Let request's referrerURL be the result of stripping referrerSource for use as a referrer.
+	let referrerURL = stripURLForUseAsAReferrer(referrerSource);
+
+	// 5. Let referrerOrigin be the result of stripping referrerSource for use as a referrer, with the
+	//    origin-only flag set to true.
+	let referrerOrigin = stripURLForUseAsAReferrer(referrerSource, true);
+
+	// 6. If the result of serializing referrerURL is a string whose length is greater than 4096, set
+	//    referrerURL to referrerOrigin.
+	if (referrerURL.toString().length > 4096) {
+		referrerURL = referrerOrigin;
+	}
+
+	// 7. The user agent MAY alter referrerURL or referrerOrigin at this point to enforce arbitrary
+	//    policy considerations in the interests of minimizing data leakage. For example, the user
+	//    agent could strip the URL down to an origin, modify its host, replace it with an empty
+	//    string, etc.
+	if (referrerURLCallback) {
+		referrerURL = referrerURLCallback(referrerURL);
+	}
+
+	if (referrerOriginCallback) {
+		referrerOrigin = referrerOriginCallback(referrerOrigin);
+	}
+
+	// 8.Execute the statements corresponding to the value of policy:
+	const currentURL = new URL(request.url);
+
+	switch (policy) {
+		case 'no-referrer':
+			return 'no-referrer';
+
+		case 'origin':
+			return referrerOrigin;
+
+		case 'unsafe-url':
+			return referrerURL;
+
+		case 'strict-origin':
+			// 1. If referrerURL is a potentially trustworthy URL and request's current URL is not a
+			//    potentially trustworthy URL, then return no referrer.
+			if (isUrlPotentiallyTrustworthy(referrerURL) && !isUrlPotentiallyTrustworthy(currentURL)) {
+				return 'no-referrer';
+			}
+
+			// 2. Return referrerOrigin.
+			return referrerOrigin.toString();
+
+		case 'strict-origin-when-cross-origin':
+			// 1. If the origin of referrerURL and the origin of request's current URL are the same, then
+			//    return referrerURL.
+			if (referrerURL.origin === currentURL.origin) {
+				return referrerURL;
+			}
+
+			// 2. If referrerURL is a potentially trustworthy URL and request's current URL is not a
+			//    potentially trustworthy URL, then return no referrer.
+			if (isUrlPotentiallyTrustworthy(referrerURL) && !isUrlPotentiallyTrustworthy(currentURL)) {
+				return 'no-referrer';
+			}
+
+			// 3. Return referrerOrigin.
+			return referrerOrigin;
+
+		case 'same-origin':
+			// 1. If the origin of referrerURL and the origin of request's current URL are the same, then
+			//    return referrerURL.
+			if (referrerURL.origin === currentURL.origin) {
+				return referrerURL;
+			}
+
+			// 2. Return no referrer.
+			return 'no-referrer';
+
+		case 'origin-when-cross-origin':
+			// 1. If the origin of referrerURL and the origin of request's current URL are the same, then
+			//    return referrerURL.
+			if (referrerURL.origin === currentURL.origin) {
+				return referrerURL;
+			}
+
+			// Return referrerOrigin.
+			return referrerOrigin;
+
+		case 'no-referrer-when-downgrade':
+			// 1. If referrerURL is a potentially trustworthy URL and request's current URL is not a
+			//    potentially trustworthy URL, then return no referrer.
+			if (isUrlPotentiallyTrustworthy(referrerURL) && !isUrlPotentiallyTrustworthy(currentURL)) {
+				return 'no-referrer';
+			}
+
+			// 2. Return referrerURL.
+			return referrerURL;
+
+		default:
+			throw new TypeError(`Invalid referrerPolicy: ${policy}`);
+	}
+}
+
+/**
+ * @see {@link https://w3c.github.io/webappsec-referrer-policy/#parse-referrer-policy-from-header|Referrer Policy §8.1. Parse a referrer policy from a Referrer-Policy header}
+ * @param {Headers} headers Response headers
+ * @returns {string} policy
+ */
+function parseReferrerPolicyFromHeader(headers) {
+	// 1. Let policy-tokens be the result of extracting header list values given `Referrer-Policy`
+	//    and response’s header list.
+	const policyTokens = (headers.get('referrer-policy') || '').split(/[,\s]+/);
+
+	// 2. Let policy be the empty string.
+	let policy = '';
+
+	// 3. For each token in policy-tokens, if token is a referrer policy and token is not the empty
+	//    string, then set policy to token.
+	// Note: This algorithm loops over multiple policy values to allow deployment of new policy
+	// values with fallbacks for older user agents, as described in § 11.1 Unknown Policy Values.
+	for (const token of policyTokens) {
+		if (token && ReferrerPolicy.has(token)) {
+			policy = token;
 		}
+	}
 
-		throw error;
-	});
+	// 4. Return policy.
+	return policy;
+}
+
+;// CONCATENATED MODULE: ./node_modules/node-fetch/src/request.js
+/**
+ * Request.js
+ *
+ * Request class contains server only options
+ *
+ * All spec algorithm step numbers are based on https://fetch.spec.whatwg.org/commit-snapshots/ae716822cb3a61843226cd090eefc6589446c1d2/.
+ */
+
+
+
+
+
+
+
+
+
+const request_INTERNALS = Symbol('Request internals');
+
+/**
+ * Check if `obj` is an instance of Request.
+ *
+ * @param  {*} object
+ * @return {boolean}
+ */
+const isRequest = object => {
+	return (
+		typeof object === 'object' &&
+		typeof object[request_INTERNALS] === 'object'
+	);
 };
 
-const ttl = {ttl: true};
-const source_all = {all: true};
-const all4 = {all: true, family: 4};
-const all6 = {all: true, family: 6};
+const doBadDataWarn = (0,external_node_util_namespaceObject.deprecate)(() => {},
+	'.data is not a valid RequestInit property, use .body instead',
+	'https://github.com/node-fetch/node-fetch/issues/1000 (request)');
 
-class CacheableLookup {
-	constructor({
-		cache = new Map(),
-		maxTtl = Infinity,
-		fallbackDuration = 3600,
-		errorTtl = 0.15,
-		resolver = new AsyncResolver(),
-		lookup = external_node_dns_namespaceObject.lookup
-	} = {}) {
-		this.maxTtl = maxTtl;
-		this.errorTtl = errorTtl;
+/**
+ * Request class
+ *
+ * Ref: https://fetch.spec.whatwg.org/#request-class
+ *
+ * @param   Mixed   input  Url or Request instance
+ * @param   Object  init   Custom options
+ * @return  Void
+ */
+class Request extends Body {
+	constructor(input, init = {}) {
+		let parsedURL;
 
-		this._cache = cache;
-		this._resolver = resolver;
-		this._dnsLookup = lookup && (0,external_node_util_namespaceObject.promisify)(lookup);
-		this.stats = {
-			cache: 0,
-			query: 0
-		};
-
-		if (this._resolver instanceof AsyncResolver) {
-			this._resolve4 = this._resolver.resolve4.bind(this._resolver);
-			this._resolve6 = this._resolver.resolve6.bind(this._resolver);
+		// Normalize input and force URL to be encoded as UTF-8 (https://github.com/node-fetch/node-fetch/issues/245)
+		if (isRequest(input)) {
+			parsedURL = new URL(input.url);
 		} else {
-			this._resolve4 = (0,external_node_util_namespaceObject.promisify)(this._resolver.resolve4.bind(this._resolver));
-			this._resolve6 = (0,external_node_util_namespaceObject.promisify)(this._resolver.resolve6.bind(this._resolver));
+			parsedURL = new URL(input);
+			input = {};
 		}
 
-		this._iface = getIfaceInfo();
-
-		this._pending = {};
-		this._nextRemovalTime = false;
-		this._hostnamesToFallback = new Set();
-
-		this.fallbackDuration = fallbackDuration;
-
-		if (fallbackDuration > 0) {
-			const interval = setInterval(() => {
-				this._hostnamesToFallback.clear();
-			}, fallbackDuration * 1000);
-
-			/* istanbul ignore next: There is no `interval.unref()` when running inside an Electron renderer */
-			if (interval.unref) {
-				interval.unref();
-			}
-
-			this._fallbackInterval = interval;
+		if (parsedURL.username !== '' || parsedURL.password !== '') {
+			throw new TypeError(`${parsedURL} is an url with embedded credentials.`);
 		}
 
-		this.lookup = this.lookup.bind(this);
-		this.lookupAsync = this.lookupAsync.bind(this);
-	}
-
-	set servers(servers) {
-		this.clear();
-
-		this._resolver.setServers(servers);
-	}
-
-	get servers() {
-		return this._resolver.getServers();
-	}
-
-	lookup(hostname, options, callback) {
-		if (typeof options === 'function') {
-			callback = options;
-			options = {};
-		} else if (typeof options === 'number') {
-			options = {
-				family: options
-			};
+		let method = init.method || input.method || 'GET';
+		if (/^(delete|get|head|options|post|put)$/i.test(method)) {
+			method = method.toUpperCase();
 		}
 
-		if (!callback) {
-			throw new Error('Callback must be a function.');
+		if (!isRequest(init) && 'data' in init) {
+			doBadDataWarn();
 		}
 
-		// eslint-disable-next-line promise/prefer-await-to-then
-		this.lookupAsync(hostname, options).then(result => {
-			if (options.all) {
-				callback(null, result);
-			} else {
-				callback(null, result.address, result.family, result.expires, result.ttl, result.source);
-			}
-		}, callback);
-	}
-
-	async lookupAsync(hostname, options = {}) {
-		if (typeof options === 'number') {
-			options = {
-				family: options
-			};
+		// eslint-disable-next-line no-eq-null, eqeqeq
+		if ((init.body != null || (isRequest(input) && input.body !== null)) &&
+			(method === 'GET' || method === 'HEAD')) {
+			throw new TypeError('Request with GET/HEAD method cannot have body');
 		}
 
-		let cached = await this.query(hostname);
+		const inputBody = init.body ?
+			init.body :
+			(isRequest(input) && input.body !== null ?
+				clone(input) :
+				null);
 
-		if (options.family === 6) {
-			const filtered = cached.filter(entry => entry.family === 6);
-
-			if (options.hints & external_node_dns_namespaceObject.V4MAPPED) {
-				if ((supportsALL && options.hints & external_node_dns_namespaceObject.ALL) || filtered.length === 0) {
-					map4to6(cached);
-				} else {
-					cached = filtered;
-				}
-			} else {
-				cached = filtered;
-			}
-		} else if (options.family === 4) {
-			cached = cached.filter(entry => entry.family === 4);
-		}
-
-		if (options.hints & external_node_dns_namespaceObject.ADDRCONFIG) {
-			const {_iface} = this;
-			cached = cached.filter(entry => entry.family === 6 ? _iface.has6 : _iface.has4);
-		}
-
-		if (cached.length === 0) {
-			const error = new Error(`cacheableLookup ENOTFOUND ${hostname}`);
-			error.code = 'ENOTFOUND';
-			error.hostname = hostname;
-
-			throw error;
-		}
-
-		if (options.all) {
-			return cached;
-		}
-
-		return cached[0];
-	}
-
-	async query(hostname) {
-		let source = 'cache';
-		let cached = await this._cache.get(hostname);
-
-		if (cached) {
-			this.stats.cache++;
-		}
-
-		if (!cached) {
-			const pending = this._pending[hostname];
-			if (pending) {
-				this.stats.cache++;
-				cached = await pending;
-			} else {
-				source = 'query';
-				const newPromise = this.queryAndCache(hostname);
-				this._pending[hostname] = newPromise;
-				this.stats.query++;
-				try {
-					cached = await newPromise;
-				} finally {
-					delete this._pending[hostname];
-				}
-			}
-		}
-
-		cached = cached.map(entry => {
-			return {...entry, source};
+		super(inputBody, {
+			size: init.size || input.size || 0
 		});
 
-		return cached;
-	}
+		const headers = new Headers(init.headers || input.headers || {});
 
-	async _resolve(hostname) {
-		// ANY is unsafe as it doesn't trigger new queries in the underlying server.
-		const [A, AAAA] = await Promise.all([
-			ignoreNoResultErrors(this._resolve4(hostname, ttl)),
-			ignoreNoResultErrors(this._resolve6(hostname, ttl))
-		]);
-
-		let aTtl = 0;
-		let aaaaTtl = 0;
-		let cacheTtl = 0;
-
-		const now = Date.now();
-
-		for (const entry of A) {
-			entry.family = 4;
-			entry.expires = now + (entry.ttl * 1000);
-
-			aTtl = Math.max(aTtl, entry.ttl);
-		}
-
-		for (const entry of AAAA) {
-			entry.family = 6;
-			entry.expires = now + (entry.ttl * 1000);
-
-			aaaaTtl = Math.max(aaaaTtl, entry.ttl);
-		}
-
-		if (A.length > 0) {
-			if (AAAA.length > 0) {
-				cacheTtl = Math.min(aTtl, aaaaTtl);
-			} else {
-				cacheTtl = aTtl;
+		if (inputBody !== null && !headers.has('Content-Type')) {
+			const contentType = extractContentType(inputBody, this);
+			if (contentType) {
+				headers.set('Content-Type', contentType);
 			}
+		}
+
+		let signal = isRequest(input) ?
+			input.signal :
+			null;
+		if ('signal' in init) {
+			signal = init.signal;
+		}
+
+		// eslint-disable-next-line no-eq-null, eqeqeq
+		if (signal != null && !isAbortSignal(signal)) {
+			throw new TypeError('Expected signal to be an instanceof AbortSignal or EventTarget');
+		}
+
+		// §5.4, Request constructor steps, step 15.1
+		// eslint-disable-next-line no-eq-null, eqeqeq
+		let referrer = init.referrer == null ? input.referrer : init.referrer;
+		if (referrer === '') {
+			// §5.4, Request constructor steps, step 15.2
+			referrer = 'no-referrer';
+		} else if (referrer) {
+			// §5.4, Request constructor steps, step 15.3.1, 15.3.2
+			const parsedReferrer = new URL(referrer);
+			// §5.4, Request constructor steps, step 15.3.3, 15.3.4
+			referrer = /^about:(\/\/)?client$/.test(parsedReferrer) ? 'client' : parsedReferrer;
 		} else {
-			cacheTtl = aaaaTtl;
+			referrer = undefined;
 		}
 
-		return {
-			entries: [
-				...A,
-				...AAAA
-			],
-			cacheTtl
+		this[request_INTERNALS] = {
+			method,
+			redirect: init.redirect || input.redirect || 'follow',
+			headers,
+			parsedURL,
+			signal,
+			referrer
 		};
+
+		// Node-fetch-only options
+		this.follow = init.follow === undefined ? (input.follow === undefined ? 20 : input.follow) : init.follow;
+		this.compress = init.compress === undefined ? (input.compress === undefined ? true : input.compress) : init.compress;
+		this.counter = init.counter || input.counter || 0;
+		this.agent = init.agent || input.agent;
+		this.highWaterMark = init.highWaterMark || input.highWaterMark || 16384;
+		this.insecureHTTPParser = init.insecureHTTPParser || input.insecureHTTPParser || false;
+
+		// §5.4, Request constructor steps, step 16.
+		// Default is empty string per https://fetch.spec.whatwg.org/#concept-request-referrer-policy
+		this.referrerPolicy = init.referrerPolicy || input.referrerPolicy || '';
 	}
 
-	async _lookup(hostname) {
-		try {
-			const [A, AAAA] = await Promise.all([
-				// Passing {all: true} doesn't return all IPv4 and IPv6 entries.
-				// See https://github.com/szmarczak/cacheable-lookup/issues/42
-				ignoreNoResultErrors(this._dnsLookup(hostname, all4)),
-				ignoreNoResultErrors(this._dnsLookup(hostname, all6))
-			]);
+	/** @returns {string} */
+	get method() {
+		return this[request_INTERNALS].method;
+	}
 
-			return {
-				entries: [
-					...A,
-					...AAAA
-				],
-				cacheTtl: 0
-			};
-		} catch {
-			return {
-				entries: [],
-				cacheTtl: 0
-			};
+	/** @returns {string} */
+	get url() {
+		return (0,external_node_url_namespaceObject.format)(this[request_INTERNALS].parsedURL);
+	}
+
+	/** @returns {Headers} */
+	get headers() {
+		return this[request_INTERNALS].headers;
+	}
+
+	get redirect() {
+		return this[request_INTERNALS].redirect;
+	}
+
+	/** @returns {AbortSignal} */
+	get signal() {
+		return this[request_INTERNALS].signal;
+	}
+
+	// https://fetch.spec.whatwg.org/#dom-request-referrer
+	get referrer() {
+		if (this[request_INTERNALS].referrer === 'no-referrer') {
+			return '';
+		}
+
+		if (this[request_INTERNALS].referrer === 'client') {
+			return 'about:client';
+		}
+
+		if (this[request_INTERNALS].referrer) {
+			return this[request_INTERNALS].referrer.toString();
+		}
+
+		return undefined;
+	}
+
+	get referrerPolicy() {
+		return this[request_INTERNALS].referrerPolicy;
+	}
+
+	set referrerPolicy(referrerPolicy) {
+		this[request_INTERNALS].referrerPolicy = validateReferrerPolicy(referrerPolicy);
+	}
+
+	/**
+	 * Clone this request
+	 *
+	 * @return  Request
+	 */
+	clone() {
+		return new Request(this);
+	}
+
+	get [Symbol.toStringTag]() {
+		return 'Request';
+	}
+}
+
+Object.defineProperties(Request.prototype, {
+	method: {enumerable: true},
+	url: {enumerable: true},
+	headers: {enumerable: true},
+	redirect: {enumerable: true},
+	clone: {enumerable: true},
+	signal: {enumerable: true},
+	referrer: {enumerable: true},
+	referrerPolicy: {enumerable: true}
+});
+
+/**
+ * Convert a Request to Node.js http request options.
+ *
+ * @param {Request} request - A Request instance
+ * @return The options object to be passed to http.request
+ */
+const getNodeRequestOptions = request => {
+	const {parsedURL} = request[request_INTERNALS];
+	const headers = new Headers(request[request_INTERNALS].headers);
+
+	// Fetch step 1.3
+	if (!headers.has('Accept')) {
+		headers.set('Accept', '*/*');
+	}
+
+	// HTTP-network-or-cache fetch steps 2.4-2.7
+	let contentLengthValue = null;
+	if (request.body === null && /^(post|put)$/i.test(request.method)) {
+		contentLengthValue = '0';
+	}
+
+	if (request.body !== null) {
+		const totalBytes = getTotalBytes(request);
+		// Set Content-Length if totalBytes is a number (that is not NaN)
+		if (typeof totalBytes === 'number' && !Number.isNaN(totalBytes)) {
+			contentLengthValue = String(totalBytes);
 		}
 	}
 
-	async _set(hostname, data, cacheTtl) {
-		if (this.maxTtl > 0 && cacheTtl > 0) {
-			cacheTtl = Math.min(cacheTtl, this.maxTtl) * 1000;
-			data[kExpires] = Date.now() + cacheTtl;
-
-			try {
-				await this._cache.set(hostname, data, cacheTtl);
-			} catch (error) {
-				this.lookupAsync = async () => {
-					const cacheError = new Error('Cache Error. Please recreate the CacheableLookup instance.');
-					cacheError.cause = error;
-
-					throw cacheError;
-				};
-			}
-
-			if (isIterable(this._cache)) {
-				this._tick(cacheTtl);
-			}
-		}
+	if (contentLengthValue) {
+		headers.set('Content-Length', contentLengthValue);
 	}
 
-	async queryAndCache(hostname) {
-		if (this._hostnamesToFallback.has(hostname)) {
-			return this._dnsLookup(hostname, source_all);
-		}
-
-		let query = await this._resolve(hostname);
-
-		if (query.entries.length === 0 && this._dnsLookup) {
-			query = await this._lookup(hostname);
-
-			if (query.entries.length !== 0 && this.fallbackDuration > 0) {
-				// Use `dns.lookup(...)` for that particular hostname
-				this._hostnamesToFallback.add(hostname);
-			}
-		}
-
-		const cacheTtl = query.entries.length === 0 ? this.errorTtl : query.cacheTtl;
-		await this._set(hostname, query.entries, cacheTtl);
-
-		return query.entries;
+	// 4.1. Main fetch, step 2.6
+	// > If request's referrer policy is the empty string, then set request's referrer policy to the
+	// > default referrer policy.
+	if (request.referrerPolicy === '') {
+		request.referrerPolicy = DEFAULT_REFERRER_POLICY;
 	}
 
-	_tick(ms) {
-		const nextRemovalTime = this._nextRemovalTime;
-
-		if (!nextRemovalTime || ms < nextRemovalTime) {
-			clearTimeout(this._removalTimeout);
-
-			this._nextRemovalTime = ms;
-
-			this._removalTimeout = setTimeout(() => {
-				this._nextRemovalTime = false;
-
-				let nextExpiry = Infinity;
-
-				const now = Date.now();
-
-				for (const [hostname, entries] of this._cache) {
-					const expires = entries[kExpires];
-
-					if (now >= expires) {
-						this._cache.delete(hostname);
-					} else if (expires < nextExpiry) {
-						nextExpiry = expires;
-					}
-				}
-
-				if (nextExpiry !== Infinity) {
-					this._tick(nextExpiry - now);
-				}
-			}, ms);
-
-			/* istanbul ignore next: There is no `timeout.unref()` when running inside an Electron renderer */
-			if (this._removalTimeout.unref) {
-				this._removalTimeout.unref();
-			}
-		}
+	// 4.1. Main fetch, step 2.7
+	// > If request's referrer is not "no-referrer", set request's referrer to the result of invoking
+	// > determine request's referrer.
+	if (request.referrer && request.referrer !== 'no-referrer') {
+		request[request_INTERNALS].referrer = determineRequestsReferrer(request);
+	} else {
+		request[request_INTERNALS].referrer = 'no-referrer';
 	}
 
-	install(agent) {
-		verifyAgent(agent);
-
-		if (kCacheableLookupCreateConnection in agent) {
-			throw new Error('CacheableLookup has been already installed');
-		}
-
-		agent[kCacheableLookupCreateConnection] = agent.createConnection;
-		agent[kCacheableLookupInstance] = this;
-
-		agent.createConnection = (options, callback) => {
-			if (!('lookup' in options)) {
-				options.lookup = this.lookup;
-			}
-
-			return agent[kCacheableLookupCreateConnection](options, callback);
-		};
+	// 4.5. HTTP-network-or-cache fetch, step 6.9
+	// > If httpRequest's referrer is a URL, then append `Referer`/httpRequest's referrer, serialized
+	// >  and isomorphic encoded, to httpRequest's header list.
+	if (request[request_INTERNALS].referrer instanceof URL) {
+		headers.set('Referer', request.referrer);
 	}
 
-	uninstall(agent) {
-		verifyAgent(agent);
-
-		if (agent[kCacheableLookupCreateConnection]) {
-			if (agent[kCacheableLookupInstance] !== this) {
-				throw new Error('The agent is not owned by this CacheableLookup instance');
-			}
-
-			agent.createConnection = agent[kCacheableLookupCreateConnection];
-
-			delete agent[kCacheableLookupCreateConnection];
-			delete agent[kCacheableLookupInstance];
-		}
+	// HTTP-network-or-cache fetch step 2.11
+	if (!headers.has('User-Agent')) {
+		headers.set('User-Agent', 'node-fetch');
 	}
 
-	updateInterfaceInfo() {
-		const {_iface} = this;
-
-		this._iface = getIfaceInfo();
-
-		if ((_iface.has4 && !this._iface.has4) || (_iface.has6 && !this._iface.has6)) {
-			this._cache.clear();
-		}
+	// HTTP-network-or-cache fetch step 2.15
+	if (request.compress && !headers.has('Accept-Encoding')) {
+		headers.set('Accept-Encoding', 'gzip, deflate, br');
 	}
 
-	clear(hostname) {
-		if (hostname) {
-			this._cache.delete(hostname);
+	let {agent} = request;
+	if (typeof agent === 'function') {
+		agent = agent(parsedURL);
+	}
+
+	if (!headers.has('Connection') && !agent) {
+		headers.set('Connection', 'close');
+	}
+
+	// HTTP-network fetch step 4.2
+	// chunked encoding is handled by Node.js
+
+	const search = getSearch(parsedURL);
+
+	// Pass the full URL directly to request(), but overwrite the following
+	// options:
+	const options = {
+		// Overwrite search to retain trailing ? (issue #776)
+		path: parsedURL.pathname + search,
+		// The following options are not expressed in the URL
+		method: request.method,
+		headers: headers[Symbol.for('nodejs.util.inspect.custom')](),
+		insecureHTTPParser: request.insecureHTTPParser,
+		agent
+	};
+
+	return {
+		/** @type {URL} */
+		parsedURL,
+		options
+	};
+};
+
+;// CONCATENATED MODULE: ./node_modules/node-fetch/src/errors/abort-error.js
+
+
+/**
+ * AbortError interface for cancelled requests
+ */
+class AbortError extends FetchBaseError {
+	constructor(message, type = 'aborted') {
+		super(message, type);
+	}
+}
+
+// EXTERNAL MODULE: ./node_modules/fetch-blob/from.js + 2 modules
+var from = __nccwpck_require__(2777);
+;// CONCATENATED MODULE: ./node_modules/node-fetch/src/index.js
+/**
+ * Index.js
+ *
+ * a request API compatible with window.fetch
+ *
+ * All spec algorithm step numbers are based on https://fetch.spec.whatwg.org/commit-snapshots/ae716822cb3a61843226cd090eefc6589446c1d2/.
+ */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+const supportedSchemas = new Set(['data:', 'http:', 'https:']);
+
+/**
+ * Fetch function
+ *
+ * @param   {string | URL | import('./request').default} url - Absolute url or Request instance
+ * @param   {*} [options_] - Fetch options
+ * @return  {Promise<import('./response').default>}
+ */
+async function fetch(url, options_) {
+	return new Promise((resolve, reject) => {
+		// Build request object
+		const request = new Request(url, options_);
+		const {parsedURL, options} = getNodeRequestOptions(request);
+		if (!supportedSchemas.has(parsedURL.protocol)) {
+			throw new TypeError(`node-fetch cannot load ${url}. URL scheme "${parsedURL.protocol.replace(/:$/, '')}" is not supported.`);
+		}
+
+		if (parsedURL.protocol === 'data:') {
+			const data = dist(request.url);
+			const response = new Response(data, {headers: {'Content-Type': data.typeFull}});
+			resolve(response);
 			return;
 		}
 
-		this._cache.clear();
-	}
+		// Wrap http.request into fetch
+		const send = (parsedURL.protocol === 'https:' ? external_node_https_namespaceObject : external_node_http_namespaceObject).request;
+		const {signal} = request;
+		let response = null;
+
+		const abort = () => {
+			const error = new AbortError('The operation was aborted.');
+			reject(error);
+			if (request.body && request.body instanceof external_node_stream_namespaceObject.Readable) {
+				request.body.destroy(error);
+			}
+
+			if (!response || !response.body) {
+				return;
+			}
+
+			response.body.emit('error', error);
+		};
+
+		if (signal && signal.aborted) {
+			abort();
+			return;
+		}
+
+		const abortAndFinalize = () => {
+			abort();
+			finalize();
+		};
+
+		// Send request
+		const request_ = send(parsedURL.toString(), options);
+
+		if (signal) {
+			signal.addEventListener('abort', abortAndFinalize);
+		}
+
+		const finalize = () => {
+			request_.abort();
+			if (signal) {
+				signal.removeEventListener('abort', abortAndFinalize);
+			}
+		};
+
+		request_.on('error', error => {
+			reject(new FetchError(`request to ${request.url} failed, reason: ${error.message}`, 'system', error));
+			finalize();
+		});
+
+		fixResponseChunkedTransferBadEnding(request_, error => {
+			if (response && response.body) {
+				response.body.destroy(error);
+			}
+		});
+
+		/* c8 ignore next 18 */
+		if (process.version < 'v14') {
+			// Before Node.js 14, pipeline() does not fully support async iterators and does not always
+			// properly handle when the socket close/end events are out of order.
+			request_.on('socket', s => {
+				let endedWithEventsCount;
+				s.prependListener('end', () => {
+					endedWithEventsCount = s._eventsCount;
+				});
+				s.prependListener('close', hadError => {
+					// if end happened before close but the socket didn't emit an error, do it now
+					if (response && endedWithEventsCount < s._eventsCount && !hadError) {
+						const error = new Error('Premature close');
+						error.code = 'ERR_STREAM_PREMATURE_CLOSE';
+						response.body.emit('error', error);
+					}
+				});
+			});
+		}
+
+		request_.on('response', response_ => {
+			request_.setTimeout(0);
+			const headers = fromRawHeaders(response_.rawHeaders);
+
+			// HTTP fetch step 5
+			if (isRedirect(response_.statusCode)) {
+				// HTTP fetch step 5.2
+				const location = headers.get('Location');
+
+				// HTTP fetch step 5.3
+				let locationURL = null;
+				try {
+					locationURL = location === null ? null : new URL(location, request.url);
+				} catch {
+					// error here can only be invalid URL in Location: header
+					// do not throw when options.redirect == manual
+					// let the user extract the errorneous redirect URL
+					if (request.redirect !== 'manual') {
+						reject(new FetchError(`uri requested responds with an invalid redirect URL: ${location}`, 'invalid-redirect'));
+						finalize();
+						return;
+					}
+				}
+
+				// HTTP fetch step 5.5
+				switch (request.redirect) {
+					case 'error':
+						reject(new FetchError(`uri requested responds with a redirect, redirect mode is set to error: ${request.url}`, 'no-redirect'));
+						finalize();
+						return;
+					case 'manual':
+						// Nothing to do
+						break;
+					case 'follow': {
+						// HTTP-redirect fetch step 2
+						if (locationURL === null) {
+							break;
+						}
+
+						// HTTP-redirect fetch step 5
+						if (request.counter >= request.follow) {
+							reject(new FetchError(`maximum redirect reached at: ${request.url}`, 'max-redirect'));
+							finalize();
+							return;
+						}
+
+						// HTTP-redirect fetch step 6 (counter increment)
+						// Create a new Request object.
+						const requestOptions = {
+							headers: new Headers(request.headers),
+							follow: request.follow,
+							counter: request.counter + 1,
+							agent: request.agent,
+							compress: request.compress,
+							method: request.method,
+							body: clone(request),
+							signal: request.signal,
+							size: request.size,
+							referrer: request.referrer,
+							referrerPolicy: request.referrerPolicy
+						};
+
+						// when forwarding sensitive headers like "Authorization",
+						// "WWW-Authenticate", and "Cookie" to untrusted targets,
+						// headers will be ignored when following a redirect to a domain
+						// that is not a subdomain match or exact match of the initial domain.
+						// For example, a redirect from "foo.com" to either "foo.com" or "sub.foo.com"
+						// will forward the sensitive headers, but a redirect to "bar.com" will not.
+						// headers will also be ignored when following a redirect to a domain using
+						// a different protocol. For example, a redirect from "https://foo.com" to "http://foo.com"
+						// will not forward the sensitive headers
+						if (!isDomainOrSubdomain(request.url, locationURL) || !isSameProtocol(request.url, locationURL)) {
+							for (const name of ['authorization', 'www-authenticate', 'cookie', 'cookie2']) {
+								requestOptions.headers.delete(name);
+							}
+						}
+
+						// HTTP-redirect fetch step 9
+						if (response_.statusCode !== 303 && request.body && options_.body instanceof external_node_stream_namespaceObject.Readable) {
+							reject(new FetchError('Cannot follow redirect with body being a readable stream', 'unsupported-redirect'));
+							finalize();
+							return;
+						}
+
+						// HTTP-redirect fetch step 11
+						if (response_.statusCode === 303 || ((response_.statusCode === 301 || response_.statusCode === 302) && request.method === 'POST')) {
+							requestOptions.method = 'GET';
+							requestOptions.body = undefined;
+							requestOptions.headers.delete('content-length');
+						}
+
+						// HTTP-redirect fetch step 14
+						const responseReferrerPolicy = parseReferrerPolicyFromHeader(headers);
+						if (responseReferrerPolicy) {
+							requestOptions.referrerPolicy = responseReferrerPolicy;
+						}
+
+						// HTTP-redirect fetch step 15
+						resolve(fetch(new Request(locationURL, requestOptions)));
+						finalize();
+						return;
+					}
+
+					default:
+						return reject(new TypeError(`Redirect option '${request.redirect}' is not a valid value of RequestRedirect`));
+				}
+			}
+
+			// Prepare response
+			if (signal) {
+				response_.once('end', () => {
+					signal.removeEventListener('abort', abortAndFinalize);
+				});
+			}
+
+			let body = (0,external_node_stream_namespaceObject.pipeline)(response_, new external_node_stream_namespaceObject.PassThrough(), error => {
+				if (error) {
+					reject(error);
+				}
+			});
+			// see https://github.com/nodejs/node/pull/29376
+			/* c8 ignore next 3 */
+			if (process.version < 'v12.10') {
+				response_.on('aborted', abortAndFinalize);
+			}
+
+			const responseOptions = {
+				url: request.url,
+				status: response_.statusCode,
+				statusText: response_.statusMessage,
+				headers,
+				size: request.size,
+				counter: request.counter,
+				highWaterMark: request.highWaterMark
+			};
+
+			// HTTP-network fetch step 12.1.1.3
+			const codings = headers.get('Content-Encoding');
+
+			// HTTP-network fetch step 12.1.1.4: handle content codings
+
+			// in following scenarios we ignore compression support
+			// 1. compression support is disabled
+			// 2. HEAD request
+			// 3. no Content-Encoding header
+			// 4. no content response (204)
+			// 5. content not modified response (304)
+			if (!request.compress || request.method === 'HEAD' || codings === null || response_.statusCode === 204 || response_.statusCode === 304) {
+				response = new Response(body, responseOptions);
+				resolve(response);
+				return;
+			}
+
+			// For Node v6+
+			// Be less strict when decoding compressed responses, since sometimes
+			// servers send slightly invalid responses that are still accepted
+			// by common browsers.
+			// Always using Z_SYNC_FLUSH is what cURL does.
+			const zlibOptions = {
+				flush: external_node_zlib_namespaceObject.Z_SYNC_FLUSH,
+				finishFlush: external_node_zlib_namespaceObject.Z_SYNC_FLUSH
+			};
+
+			// For gzip
+			if (codings === 'gzip' || codings === 'x-gzip') {
+				body = (0,external_node_stream_namespaceObject.pipeline)(body, external_node_zlib_namespaceObject.createGunzip(zlibOptions), error => {
+					if (error) {
+						reject(error);
+					}
+				});
+				response = new Response(body, responseOptions);
+				resolve(response);
+				return;
+			}
+
+			// For deflate
+			if (codings === 'deflate' || codings === 'x-deflate') {
+				// Handle the infamous raw deflate response from old servers
+				// a hack for old IIS and Apache servers
+				const raw = (0,external_node_stream_namespaceObject.pipeline)(response_, new external_node_stream_namespaceObject.PassThrough(), error => {
+					if (error) {
+						reject(error);
+					}
+				});
+				raw.once('data', chunk => {
+					// See http://stackoverflow.com/questions/37519828
+					if ((chunk[0] & 0x0F) === 0x08) {
+						body = (0,external_node_stream_namespaceObject.pipeline)(body, external_node_zlib_namespaceObject.createInflate(), error => {
+							if (error) {
+								reject(error);
+							}
+						});
+					} else {
+						body = (0,external_node_stream_namespaceObject.pipeline)(body, external_node_zlib_namespaceObject.createInflateRaw(), error => {
+							if (error) {
+								reject(error);
+							}
+						});
+					}
+
+					response = new Response(body, responseOptions);
+					resolve(response);
+				});
+				raw.once('end', () => {
+					// Some old IIS servers return zero-length OK deflate responses, so
+					// 'data' is never emitted. See https://github.com/node-fetch/node-fetch/pull/903
+					if (!response) {
+						response = new Response(body, responseOptions);
+						resolve(response);
+					}
+				});
+				return;
+			}
+
+			// For br
+			if (codings === 'br') {
+				body = (0,external_node_stream_namespaceObject.pipeline)(body, external_node_zlib_namespaceObject.createBrotliDecompress(), error => {
+					if (error) {
+						reject(error);
+					}
+				});
+				response = new Response(body, responseOptions);
+				resolve(response);
+				return;
+			}
+
+			// Otherwise, use response as-is
+			response = new Response(body, responseOptions);
+			resolve(response);
+		});
+
+		// eslint-disable-next-line promise/prefer-await-to-then
+		writeToStream(request_, request).catch(reject);
+	});
 }
 
-// EXTERNAL MODULE: ./node_modules/http2-wrapper/source/index.js
-var http2_wrapper_source = __nccwpck_require__(4645);
-;// CONCATENATED MODULE: ./node_modules/got/dist/source/core/parse-link-header.js
-function parseLinkHeader(link) {
-    const parsed = [];
-    const items = link.split(',');
-    for (const item of items) {
-        // https://tools.ietf.org/html/rfc5988#section-5
-        const [rawUriReference, ...rawLinkParameters] = item.split(';');
-        const trimmedUriReference = rawUriReference.trim();
-        // eslint-disable-next-line @typescript-eslint/prefer-string-starts-ends-with
-        if (trimmedUriReference[0] !== '<' || trimmedUriReference[trimmedUriReference.length - 1] !== '>') {
-            throw new Error(`Invalid format of the Link header reference: ${trimmedUriReference}`);
-        }
-        const reference = trimmedUriReference.slice(1, -1);
-        const parameters = {};
-        if (rawLinkParameters.length === 0) {
-            throw new Error(`Unexpected end of Link header parameters: ${rawLinkParameters.join(';')}`);
-        }
-        for (const rawParameter of rawLinkParameters) {
-            const trimmedRawParameter = rawParameter.trim();
-            const center = trimmedRawParameter.indexOf('=');
-            if (center === -1) {
-                throw new Error(`Failed to parse Link header: ${link}`);
-            }
-            const name = trimmedRawParameter.slice(0, center).trim();
-            const value = trimmedRawParameter.slice(center + 1).trim();
-            parameters[name] = value;
-        }
-        parsed.push({
-            reference,
-            parameters,
-        });
-    }
-    return parsed;
+function fixResponseChunkedTransferBadEnding(request, errorCallback) {
+	const LAST_CHUNK = external_node_buffer_namespaceObject.Buffer.from('0\r\n\r\n');
+
+	let isChunkedTransfer = false;
+	let properLastChunkReceived = false;
+	let previousChunk;
+
+	request.on('response', response => {
+		const {headers} = response;
+		isChunkedTransfer = headers['transfer-encoding'] === 'chunked' && !headers['content-length'];
+	});
+
+	request.on('socket', socket => {
+		const onSocketClose = () => {
+			if (isChunkedTransfer && !properLastChunkReceived) {
+				const error = new Error('Premature close');
+				error.code = 'ERR_STREAM_PREMATURE_CLOSE';
+				errorCallback(error);
+			}
+		};
+
+		const onData = buf => {
+			properLastChunkReceived = external_node_buffer_namespaceObject.Buffer.compare(buf.slice(-5), LAST_CHUNK) === 0;
+
+			// Sometimes final 0-length chunk and end of message code are in separate packets
+			if (!properLastChunkReceived && previousChunk) {
+				properLastChunkReceived = (
+					external_node_buffer_namespaceObject.Buffer.compare(previousChunk.slice(-3), LAST_CHUNK.slice(0, 3)) === 0 &&
+					external_node_buffer_namespaceObject.Buffer.compare(buf.slice(-2), LAST_CHUNK.slice(3)) === 0
+				);
+			}
+
+			previousChunk = buf;
+		};
+
+		socket.prependListener('close', onSocketClose);
+		socket.on('data', onData);
+
+		request.on('close', () => {
+			socket.removeListener('close', onSocketClose);
+			socket.removeListener('data', onData);
+		});
+	});
 }
-
-;// CONCATENATED MODULE: ./node_modules/got/dist/source/core/options.js
-
-
-
-
-// DO NOT use destructuring for `https.request` and `http.request` as it's not compatible with `nock`.
-
-
-
-
-
-
-
-
-const [major, minor] = external_node_process_namespaceObject.versions.node.split('.').map(Number);
-function validateSearchParameters(searchParameters) {
-    // eslint-disable-next-line guard-for-in
-    for (const key in searchParameters) {
-        const value = searchParameters[key];
-        assert.any([dist.string, dist.number, dist.boolean, dist.null_, dist.undefined], value);
-    }
-}
-const globalCache = new Map();
-let globalDnsCache;
-const getGlobalDnsCache = () => {
-    if (globalDnsCache) {
-        return globalDnsCache;
-    }
-    globalDnsCache = new CacheableLookup();
-    return globalDnsCache;
-};
-const defaultInternals = {
-    request: undefined,
-    agent: {
-        http: undefined,
-        https: undefined,
-        http2: undefined,
-    },
-    h2session: undefined,
-    decompress: true,
-    timeout: {
-        connect: undefined,
-        lookup: undefined,
-        read: undefined,
-        request: undefined,
-        response: undefined,
-        secureConnect: undefined,
-        send: undefined,
-        socket: undefined,
-    },
-    prefixUrl: '',
-    body: undefined,
-    form: undefined,
-    json: undefined,
-    cookieJar: undefined,
-    ignoreInvalidCookies: false,
-    searchParams: undefined,
-    dnsLookup: undefined,
-    dnsCache: undefined,
-    context: {},
-    hooks: {
-        init: [],
-        beforeRequest: [],
-        beforeError: [],
-        beforeRedirect: [],
-        beforeRetry: [],
-        afterResponse: [],
-    },
-    followRedirect: true,
-    maxRedirects: 10,
-    cache: undefined,
-    throwHttpErrors: true,
-    username: '',
-    password: '',
-    http2: false,
-    allowGetBody: false,
-    headers: {
-        'user-agent': 'got (https://github.com/sindresorhus/got)',
-    },
-    methodRewriting: false,
-    dnsLookupIpVersion: undefined,
-    parseJson: JSON.parse,
-    stringifyJson: JSON.stringify,
-    retry: {
-        limit: 2,
-        methods: [
-            'GET',
-            'PUT',
-            'HEAD',
-            'DELETE',
-            'OPTIONS',
-            'TRACE',
-        ],
-        statusCodes: [
-            408,
-            413,
-            429,
-            500,
-            502,
-            503,
-            504,
-            521,
-            522,
-            524,
-        ],
-        errorCodes: [
-            'ETIMEDOUT',
-            'ECONNRESET',
-            'EADDRINUSE',
-            'ECONNREFUSED',
-            'EPIPE',
-            'ENOTFOUND',
-            'ENETUNREACH',
-            'EAI_AGAIN',
-        ],
-        maxRetryAfter: undefined,
-        calculateDelay: ({ computedValue }) => computedValue,
-        backoffLimit: Number.POSITIVE_INFINITY,
-        noise: 100,
-    },
-    localAddress: undefined,
-    method: 'GET',
-    createConnection: undefined,
-    cacheOptions: {
-        shared: undefined,
-        cacheHeuristic: undefined,
-        immutableMinTimeToLive: undefined,
-        ignoreCargoCult: undefined,
-    },
-    https: {
-        alpnProtocols: undefined,
-        rejectUnauthorized: undefined,
-        checkServerIdentity: undefined,
-        certificateAuthority: undefined,
-        key: undefined,
-        certificate: undefined,
-        passphrase: undefined,
-        pfx: undefined,
-        ciphers: undefined,
-        honorCipherOrder: undefined,
-        minVersion: undefined,
-        maxVersion: undefined,
-        signatureAlgorithms: undefined,
-        tlsSessionLifetime: undefined,
-        dhparam: undefined,
-        ecdhCurve: undefined,
-        certificateRevocationLists: undefined,
-    },
-    encoding: undefined,
-    resolveBodyOnly: false,
-    isStream: false,
-    responseType: 'text',
-    url: undefined,
-    pagination: {
-        transform(response) {
-            if (response.request.options.responseType === 'json') {
-                return response.body;
-            }
-            return JSON.parse(response.body);
-        },
-        paginate({ response }) {
-            const rawLinkHeader = response.headers.link;
-            if (typeof rawLinkHeader !== 'string' || rawLinkHeader.trim() === '') {
-                return false;
-            }
-            const parsed = parseLinkHeader(rawLinkHeader);
-            const next = parsed.find(entry => entry.parameters.rel === 'next' || entry.parameters.rel === '"next"');
-            if (next) {
-                return {
-                    url: new external_node_url_namespaceObject.URL(next.reference, response.url),
-                };
-            }
-            return false;
-        },
-        filter: () => true,
-        shouldContinue: () => true,
-        countLimit: Number.POSITIVE_INFINITY,
-        backoff: 0,
-        requestLimit: 10000,
-        stackAllItems: false,
-    },
-    setHost: true,
-    maxHeaderSize: undefined,
-    signal: undefined,
-    enableUnixSockets: true,
-};
-const cloneInternals = (internals) => {
-    const { hooks, retry } = internals;
-    const result = {
-        ...internals,
-        context: { ...internals.context },
-        cacheOptions: { ...internals.cacheOptions },
-        https: { ...internals.https },
-        agent: { ...internals.agent },
-        headers: { ...internals.headers },
-        retry: {
-            ...retry,
-            errorCodes: [...retry.errorCodes],
-            methods: [...retry.methods],
-            statusCodes: [...retry.statusCodes],
-        },
-        timeout: { ...internals.timeout },
-        hooks: {
-            init: [...hooks.init],
-            beforeRequest: [...hooks.beforeRequest],
-            beforeError: [...hooks.beforeError],
-            beforeRedirect: [...hooks.beforeRedirect],
-            beforeRetry: [...hooks.beforeRetry],
-            afterResponse: [...hooks.afterResponse],
-        },
-        searchParams: internals.searchParams ? new external_node_url_namespaceObject.URLSearchParams(internals.searchParams) : undefined,
-        pagination: { ...internals.pagination },
-    };
-    if (result.url !== undefined) {
-        result.prefixUrl = '';
-    }
-    return result;
-};
-const cloneRaw = (raw) => {
-    const { hooks, retry } = raw;
-    const result = { ...raw };
-    if (dist.object(raw.context)) {
-        result.context = { ...raw.context };
-    }
-    if (dist.object(raw.cacheOptions)) {
-        result.cacheOptions = { ...raw.cacheOptions };
-    }
-    if (dist.object(raw.https)) {
-        result.https = { ...raw.https };
-    }
-    if (dist.object(raw.cacheOptions)) {
-        result.cacheOptions = { ...result.cacheOptions };
-    }
-    if (dist.object(raw.agent)) {
-        result.agent = { ...raw.agent };
-    }
-    if (dist.object(raw.headers)) {
-        result.headers = { ...raw.headers };
-    }
-    if (dist.object(retry)) {
-        result.retry = { ...retry };
-        if (dist.array(retry.errorCodes)) {
-            result.retry.errorCodes = [...retry.errorCodes];
-        }
-        if (dist.array(retry.methods)) {
-            result.retry.methods = [...retry.methods];
-        }
-        if (dist.array(retry.statusCodes)) {
-            result.retry.statusCodes = [...retry.statusCodes];
-        }
-    }
-    if (dist.object(raw.timeout)) {
-        result.timeout = { ...raw.timeout };
-    }
-    if (dist.object(hooks)) {
-        result.hooks = {
-            ...hooks,
-        };
-        if (dist.array(hooks.init)) {
-            result.hooks.init = [...hooks.init];
-        }
-        if (dist.array(hooks.beforeRequest)) {
-            result.hooks.beforeRequest = [...hooks.beforeRequest];
-        }
-        if (dist.array(hooks.beforeError)) {
-            result.hooks.beforeError = [...hooks.beforeError];
-        }
-        if (dist.array(hooks.beforeRedirect)) {
-            result.hooks.beforeRedirect = [...hooks.beforeRedirect];
-        }
-        if (dist.array(hooks.beforeRetry)) {
-            result.hooks.beforeRetry = [...hooks.beforeRetry];
-        }
-        if (dist.array(hooks.afterResponse)) {
-            result.hooks.afterResponse = [...hooks.afterResponse];
-        }
-    }
-    // TODO: raw.searchParams
-    if (dist.object(raw.pagination)) {
-        result.pagination = { ...raw.pagination };
-    }
-    return result;
-};
-const getHttp2TimeoutOption = (internals) => {
-    const delays = [internals.timeout.socket, internals.timeout.connect, internals.timeout.lookup, internals.timeout.request, internals.timeout.secureConnect].filter(delay => typeof delay === 'number');
-    if (delays.length > 0) {
-        return Math.min(...delays);
-    }
-    return undefined;
-};
-const init = (options, withOptions, self) => {
-    const initHooks = options.hooks?.init;
-    if (initHooks) {
-        for (const hook of initHooks) {
-            hook(withOptions, self);
-        }
-    }
-};
-class Options {
-    constructor(input, options, defaults) {
-        Object.defineProperty(this, "_unixOptions", {
-            enumerable: true,
-            configurable: true,
-            writable: true,
-            value: void 0
-        });
-        Object.defineProperty(this, "_internals", {
-            enumerable: true,
-            configurable: true,
-            writable: true,
-            value: void 0
-        });
-        Object.defineProperty(this, "_merging", {
-            enumerable: true,
-            configurable: true,
-            writable: true,
-            value: void 0
-        });
-        Object.defineProperty(this, "_init", {
-            enumerable: true,
-            configurable: true,
-            writable: true,
-            value: void 0
-        });
-        assert.any([dist.string, dist.urlInstance, dist.object, dist.undefined], input);
-        assert.any([dist.object, dist.undefined], options);
-        assert.any([dist.object, dist.undefined], defaults);
-        if (input instanceof Options || options instanceof Options) {
-            throw new TypeError('The defaults must be passed as the third argument');
-        }
-        this._internals = cloneInternals(defaults?._internals ?? defaults ?? defaultInternals);
-        this._init = [...(defaults?._init ?? [])];
-        this._merging = false;
-        this._unixOptions = undefined;
-        // This rule allows `finally` to be considered more important.
-        // Meaning no matter the error thrown in the `try` block,
-        // if `finally` throws then the `finally` error will be thrown.
-        //
-        // Yes, we want this. If we set `url` first, then the `url.searchParams`
-        // would get merged. Instead we set the `searchParams` first, then
-        // `url.searchParams` is overwritten as expected.
-        //
-        /* eslint-disable no-unsafe-finally */
-        try {
-            if (dist.plainObject(input)) {
-                try {
-                    this.merge(input);
-                    this.merge(options);
-                }
-                finally {
-                    this.url = input.url;
-                }
-            }
-            else {
-                try {
-                    this.merge(options);
-                }
-                finally {
-                    if (options?.url !== undefined) {
-                        if (input === undefined) {
-                            this.url = options.url;
-                        }
-                        else {
-                            throw new TypeError('The `url` option is mutually exclusive with the `input` argument');
-                        }
-                    }
-                    else if (input !== undefined) {
-                        this.url = input;
-                    }
-                }
-            }
-        }
-        catch (error) {
-            error.options = this;
-            throw error;
-        }
-        /* eslint-enable no-unsafe-finally */
-    }
-    merge(options) {
-        if (!options) {
-            return;
-        }
-        if (options instanceof Options) {
-            for (const init of options._init) {
-                this.merge(init);
-            }
-            return;
-        }
-        options = cloneRaw(options);
-        init(this, options, this);
-        init(options, options, this);
-        this._merging = true;
-        // Always merge `isStream` first
-        if ('isStream' in options) {
-            this.isStream = options.isStream;
-        }
-        try {
-            let push = false;
-            for (const key in options) {
-                // `got.extend()` options
-                if (key === 'mutableDefaults' || key === 'handlers') {
-                    continue;
-                }
-                // Never merge `url`
-                if (key === 'url') {
-                    continue;
-                }
-                if (!(key in this)) {
-                    throw new Error(`Unexpected option: ${key}`);
-                }
-                // @ts-expect-error Type 'unknown' is not assignable to type 'never'.
-                this[key] = options[key];
-                push = true;
-            }
-            if (push) {
-                this._init.push(options);
-            }
-        }
-        finally {
-            this._merging = false;
-        }
-    }
-    /**
-    Custom request function.
-    The main purpose of this is to [support HTTP2 using a wrapper](https://github.com/szmarczak/http2-wrapper).
-
-    @default http.request | https.request
-    */
-    get request() {
-        return this._internals.request;
-    }
-    set request(value) {
-        assert.any([dist.function_, dist.undefined], value);
-        this._internals.request = value;
-    }
-    /**
-    An object representing `http`, `https` and `http2` keys for [`http.Agent`](https://nodejs.org/api/http.html#http_class_http_agent), [`https.Agent`](https://nodejs.org/api/https.html#https_class_https_agent) and [`http2wrapper.Agent`](https://github.com/szmarczak/http2-wrapper#new-http2agentoptions) instance.
-    This is necessary because a request to one protocol might redirect to another.
-    In such a scenario, Got will switch over to the right protocol agent for you.
-
-    If a key is not present, it will default to a global agent.
-
-    @example
-    ```
-    import got from 'got';
-    import HttpAgent from 'agentkeepalive';
-
-    const {HttpsAgent} = HttpAgent;
-
-    await got('https://sindresorhus.com', {
-        agent: {
-            http: new HttpAgent(),
-            https: new HttpsAgent()
-        }
-    });
-    ```
-    */
-    get agent() {
-        return this._internals.agent;
-    }
-    set agent(value) {
-        assert.plainObject(value);
-        // eslint-disable-next-line guard-for-in
-        for (const key in value) {
-            if (!(key in this._internals.agent)) {
-                throw new TypeError(`Unexpected agent option: ${key}`);
-            }
-            // @ts-expect-error - No idea why `value[key]` doesn't work here.
-            assert.any([dist.object, dist.undefined], value[key]);
-        }
-        if (this._merging) {
-            Object.assign(this._internals.agent, value);
-        }
-        else {
-            this._internals.agent = { ...value };
-        }
-    }
-    get h2session() {
-        return this._internals.h2session;
-    }
-    set h2session(value) {
-        this._internals.h2session = value;
-    }
-    /**
-    Decompress the response automatically.
-
-    This will set the `accept-encoding` header to `gzip, deflate, br` unless you set it yourself.
-
-    If this is disabled, a compressed response is returned as a `Buffer`.
-    This may be useful if you want to handle decompression yourself or stream the raw compressed data.
-
-    @default true
-    */
-    get decompress() {
-        return this._internals.decompress;
-    }
-    set decompress(value) {
-        assert.boolean(value);
-        this._internals.decompress = value;
-    }
-    /**
-    Milliseconds to wait for the server to end the response before aborting the request with `got.TimeoutError` error (a.k.a. `request` property).
-    By default, there's no timeout.
-
-    This also accepts an `object` with the following fields to constrain the duration of each phase of the request lifecycle:
-
-    - `lookup` starts when a socket is assigned and ends when the hostname has been resolved.
-        Does not apply when using a Unix domain socket.
-    - `connect` starts when `lookup` completes (or when the socket is assigned if lookup does not apply to the request) and ends when the socket is connected.
-    - `secureConnect` starts when `connect` completes and ends when the handshaking process completes (HTTPS only).
-    - `socket` starts when the socket is connected. See [request.setTimeout](https://nodejs.org/api/http.html#http_request_settimeout_timeout_callback).
-    - `response` starts when the request has been written to the socket and ends when the response headers are received.
-    - `send` starts when the socket is connected and ends with the request has been written to the socket.
-    - `request` starts when the request is initiated and ends when the response's end event fires.
-    */
-    get timeout() {
-        // We always return `Delays` here.
-        // It has to be `Delays | number`, otherwise TypeScript will error because the getter and the setter have incompatible types.
-        return this._internals.timeout;
-    }
-    set timeout(value) {
-        assert.plainObject(value);
-        // eslint-disable-next-line guard-for-in
-        for (const key in value) {
-            if (!(key in this._internals.timeout)) {
-                throw new Error(`Unexpected timeout option: ${key}`);
-            }
-            // @ts-expect-error - No idea why `value[key]` doesn't work here.
-            assert.any([dist.number, dist.undefined], value[key]);
-        }
-        if (this._merging) {
-            Object.assign(this._internals.timeout, value);
-        }
-        else {
-            this._internals.timeout = { ...value };
-        }
-    }
-    /**
-    When specified, `prefixUrl` will be prepended to `url`.
-    The prefix can be any valid URL, either relative or absolute.
-    A trailing slash `/` is optional - one will be added automatically.
-
-    __Note__: `prefixUrl` will be ignored if the `url` argument is a URL instance.
-
-    __Note__: Leading slashes in `input` are disallowed when using this option to enforce consistency and avoid confusion.
-    For example, when the prefix URL is `https://example.com/foo` and the input is `/bar`, there's ambiguity whether the resulting URL would become `https://example.com/foo/bar` or `https://example.com/bar`.
-    The latter is used by browsers.
-
-    __Tip__: Useful when used with `got.extend()` to create niche-specific Got instances.
-
-    __Tip__: You can change `prefixUrl` using hooks as long as the URL still includes the `prefixUrl`.
-    If the URL doesn't include it anymore, it will throw.
-
-    @example
-    ```
-    import got from 'got';
-
-    await got('unicorn', {prefixUrl: 'https://cats.com'});
-    //=> 'https://cats.com/unicorn'
-
-    const instance = got.extend({
-        prefixUrl: 'https://google.com'
-    });
-
-    await instance('unicorn', {
-        hooks: {
-            beforeRequest: [
-                options => {
-                    options.prefixUrl = 'https://cats.com';
-                }
-            ]
-        }
-    });
-    //=> 'https://cats.com/unicorn'
-    ```
-    */
-    get prefixUrl() {
-        // We always return `string` here.
-        // It has to be `string | URL`, otherwise TypeScript will error because the getter and the setter have incompatible types.
-        return this._internals.prefixUrl;
-    }
-    set prefixUrl(value) {
-        assert.any([dist.string, dist.urlInstance], value);
-        if (value === '') {
-            this._internals.prefixUrl = '';
-            return;
-        }
-        value = value.toString();
-        if (!value.endsWith('/')) {
-            value += '/';
-        }
-        if (this._internals.prefixUrl && this._internals.url) {
-            const { href } = this._internals.url;
-            this._internals.url.href = value + href.slice(this._internals.prefixUrl.length);
-        }
-        this._internals.prefixUrl = value;
-    }
-    /**
-    __Note #1__: The `body` option cannot be used with the `json` or `form` option.
-
-    __Note #2__: If you provide this option, `got.stream()` will be read-only.
-
-    __Note #3__: If you provide a payload with the `GET` or `HEAD` method, it will throw a `TypeError` unless the method is `GET` and the `allowGetBody` option is set to `true`.
-
-    __Note #4__: This option is not enumerable and will not be merged with the instance defaults.
-
-    The `content-length` header will be automatically set if `body` is a `string` / `Buffer` / [`FormData`](https://developer.mozilla.org/en-US/docs/Web/API/FormData) / [`form-data` instance](https://github.com/form-data/form-data), and `content-length` and `transfer-encoding` are not manually set in `options.headers`.
-
-    Since Got 12, the `content-length` is not automatically set when `body` is a `fs.createReadStream`.
-    */
-    get body() {
-        return this._internals.body;
-    }
-    set body(value) {
-        assert.any([dist.string, dist.buffer, dist.nodeStream, dist.generator, dist.asyncGenerator, isFormData, dist.undefined], value);
-        if (dist.nodeStream(value)) {
-            assert.truthy(value.readable);
-        }
-        if (value !== undefined) {
-            assert.undefined(this._internals.form);
-            assert.undefined(this._internals.json);
-        }
-        this._internals.body = value;
-    }
-    /**
-    The form body is converted to a query string using [`(new URLSearchParams(object)).toString()`](https://nodejs.org/api/url.html#url_constructor_new_urlsearchparams_obj).
-
-    If the `Content-Type` header is not present, it will be set to `application/x-www-form-urlencoded`.
-
-    __Note #1__: If you provide this option, `got.stream()` will be read-only.
-
-    __Note #2__: This option is not enumerable and will not be merged with the instance defaults.
-    */
-    get form() {
-        return this._internals.form;
-    }
-    set form(value) {
-        assert.any([dist.plainObject, dist.undefined], value);
-        if (value !== undefined) {
-            assert.undefined(this._internals.body);
-            assert.undefined(this._internals.json);
-        }
-        this._internals.form = value;
-    }
-    /**
-    JSON body. If the `Content-Type` header is not set, it will be set to `application/json`.
-
-    __Note #1__: If you provide this option, `got.stream()` will be read-only.
-
-    __Note #2__: This option is not enumerable and will not be merged with the instance defaults.
-    */
-    get json() {
-        return this._internals.json;
-    }
-    set json(value) {
-        if (value !== undefined) {
-            assert.undefined(this._internals.body);
-            assert.undefined(this._internals.form);
-        }
-        this._internals.json = value;
-    }
-    /**
-    The URL to request, as a string, a [`https.request` options object](https://nodejs.org/api/https.html#https_https_request_options_callback), or a [WHATWG `URL`](https://nodejs.org/api/url.html#url_class_url).
-
-    Properties from `options` will override properties in the parsed `url`.
-
-    If no protocol is specified, it will throw a `TypeError`.
-
-    __Note__: The query string is **not** parsed as search params.
-
-    @example
-    ```
-    await got('https://example.com/?query=a b'); //=> https://example.com/?query=a%20b
-    await got('https://example.com/', {searchParams: {query: 'a b'}}); //=> https://example.com/?query=a+b
-
-    // The query string is overridden by `searchParams`
-    await got('https://example.com/?query=a b', {searchParams: {query: 'a b'}}); //=> https://example.com/?query=a+b
-    ```
-    */
-    get url() {
-        return this._internals.url;
-    }
-    set url(value) {
-        assert.any([dist.string, dist.urlInstance, dist.undefined], value);
-        if (value === undefined) {
-            this._internals.url = undefined;
-            return;
-        }
-        if (dist.string(value) && value.startsWith('/')) {
-            throw new Error('`url` must not start with a slash');
-        }
-        const urlString = `${this.prefixUrl}${value.toString()}`;
-        const url = new external_node_url_namespaceObject.URL(urlString);
-        this._internals.url = url;
-        decodeURI(urlString);
-        if (url.protocol === 'unix:') {
-            url.href = `http://unix${url.pathname}${url.search}`;
-        }
-        if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-            const error = new Error(`Unsupported protocol: ${url.protocol}`);
-            error.code = 'ERR_UNSUPPORTED_PROTOCOL';
-            throw error;
-        }
-        if (this._internals.username) {
-            url.username = this._internals.username;
-            this._internals.username = '';
-        }
-        if (this._internals.password) {
-            url.password = this._internals.password;
-            this._internals.password = '';
-        }
-        if (this._internals.searchParams) {
-            url.search = this._internals.searchParams.toString();
-            this._internals.searchParams = undefined;
-        }
-        if (url.hostname === 'unix') {
-            if (!this._internals.enableUnixSockets) {
-                throw new Error('Using UNIX domain sockets but option `enableUnixSockets` is not enabled');
-            }
-            const matches = /(?<socketPath>.+?):(?<path>.+)/.exec(`${url.pathname}${url.search}`);
-            if (matches?.groups) {
-                const { socketPath, path } = matches.groups;
-                this._unixOptions = {
-                    socketPath,
-                    path,
-                    host: '',
-                };
-            }
-            else {
-                this._unixOptions = undefined;
-            }
-            return;
-        }
-        this._unixOptions = undefined;
-    }
-    /**
-    Cookie support. You don't have to care about parsing or how to store them.
-
-    __Note__: If you provide this option, `options.headers.cookie` will be overridden.
-    */
-    get cookieJar() {
-        return this._internals.cookieJar;
-    }
-    set cookieJar(value) {
-        assert.any([dist.object, dist.undefined], value);
-        if (value === undefined) {
-            this._internals.cookieJar = undefined;
-            return;
-        }
-        let { setCookie, getCookieString } = value;
-        assert.function_(setCookie);
-        assert.function_(getCookieString);
-        /* istanbul ignore next: Horrible `tough-cookie` v3 check */
-        if (setCookie.length === 4 && getCookieString.length === 0) {
-            setCookie = (0,external_node_util_namespaceObject.promisify)(setCookie.bind(value));
-            getCookieString = (0,external_node_util_namespaceObject.promisify)(getCookieString.bind(value));
-            this._internals.cookieJar = {
-                setCookie,
-                getCookieString: getCookieString,
-            };
-        }
-        else {
-            this._internals.cookieJar = value;
-        }
-    }
-    /**
-    You can abort the `request` using [`AbortController`](https://developer.mozilla.org/en-US/docs/Web/API/AbortController).
-
-    *Requires Node.js 16 or later.*
-
-    @example
-    ```
-    import got from 'got';
-
-    const abortController = new AbortController();
-
-    const request = got('https://httpbin.org/anything', {
-        signal: abortController.signal
-    });
-
-    setTimeout(() => {
-        abortController.abort();
-    }, 100);
-    ```
-    */
-    // TODO: Replace `any` with `AbortSignal` when targeting Node 16.
-    get signal() {
-        return this._internals.signal;
-    }
-    // TODO: Replace `any` with `AbortSignal` when targeting Node 16.
-    set signal(value) {
-        assert.object(value);
-        this._internals.signal = value;
-    }
-    /**
-    Ignore invalid cookies instead of throwing an error.
-    Only useful when the `cookieJar` option has been set. Not recommended.
-
-    @default false
-    */
-    get ignoreInvalidCookies() {
-        return this._internals.ignoreInvalidCookies;
-    }
-    set ignoreInvalidCookies(value) {
-        assert.boolean(value);
-        this._internals.ignoreInvalidCookies = value;
-    }
-    /**
-    Query string that will be added to the request URL.
-    This will override the query string in `url`.
-
-    If you need to pass in an array, you can do it using a `URLSearchParams` instance.
-
-    @example
-    ```
-    import got from 'got';
-
-    const searchParams = new URLSearchParams([['key', 'a'], ['key', 'b']]);
-
-    await got('https://example.com', {searchParams});
-
-    console.log(searchParams.toString());
-    //=> 'key=a&key=b'
-    ```
-    */
-    get searchParams() {
-        if (this._internals.url) {
-            return this._internals.url.searchParams;
-        }
-        if (this._internals.searchParams === undefined) {
-            this._internals.searchParams = new external_node_url_namespaceObject.URLSearchParams();
-        }
-        return this._internals.searchParams;
-    }
-    set searchParams(value) {
-        assert.any([dist.string, dist.object, dist.undefined], value);
-        const url = this._internals.url;
-        if (value === undefined) {
-            this._internals.searchParams = undefined;
-            if (url) {
-                url.search = '';
-            }
-            return;
-        }
-        const searchParameters = this.searchParams;
-        let updated;
-        if (dist.string(value)) {
-            updated = new external_node_url_namespaceObject.URLSearchParams(value);
-        }
-        else if (value instanceof external_node_url_namespaceObject.URLSearchParams) {
-            updated = value;
-        }
-        else {
-            validateSearchParameters(value);
-            updated = new external_node_url_namespaceObject.URLSearchParams();
-            // eslint-disable-next-line guard-for-in
-            for (const key in value) {
-                const entry = value[key];
-                if (entry === null) {
-                    updated.append(key, '');
-                }
-                else if (entry === undefined) {
-                    searchParameters.delete(key);
-                }
-                else {
-                    updated.append(key, entry);
-                }
-            }
-        }
-        if (this._merging) {
-            // These keys will be replaced
-            for (const key of updated.keys()) {
-                searchParameters.delete(key);
-            }
-            for (const [key, value] of updated) {
-                searchParameters.append(key, value);
-            }
-        }
-        else if (url) {
-            url.search = searchParameters.toString();
-        }
-        else {
-            this._internals.searchParams = searchParameters;
-        }
-    }
-    get searchParameters() {
-        throw new Error('The `searchParameters` option does not exist. Use `searchParams` instead.');
-    }
-    set searchParameters(_value) {
-        throw new Error('The `searchParameters` option does not exist. Use `searchParams` instead.');
-    }
-    get dnsLookup() {
-        return this._internals.dnsLookup;
-    }
-    set dnsLookup(value) {
-        assert.any([dist.function_, dist.undefined], value);
-        this._internals.dnsLookup = value;
-    }
-    /**
-    An instance of [`CacheableLookup`](https://github.com/szmarczak/cacheable-lookup) used for making DNS lookups.
-    Useful when making lots of requests to different *public* hostnames.
-
-    `CacheableLookup` uses `dns.resolver4(..)` and `dns.resolver6(...)` under the hood and fall backs to `dns.lookup(...)` when the first two fail, which may lead to additional delay.
-
-    __Note__: This should stay disabled when making requests to internal hostnames such as `localhost`, `database.local` etc.
-
-    @default false
-    */
-    get dnsCache() {
-        return this._internals.dnsCache;
-    }
-    set dnsCache(value) {
-        assert.any([dist.object, dist.boolean, dist.undefined], value);
-        if (value === true) {
-            this._internals.dnsCache = getGlobalDnsCache();
-        }
-        else if (value === false) {
-            this._internals.dnsCache = undefined;
-        }
-        else {
-            this._internals.dnsCache = value;
-        }
-    }
-    /**
-    User data. `context` is shallow merged and enumerable. If it contains non-enumerable properties they will NOT be merged.
-
-    @example
-    ```
-    import got from 'got';
-
-    const instance = got.extend({
-        hooks: {
-            beforeRequest: [
-                options => {
-                    if (!options.context || !options.context.token) {
-                        throw new Error('Token required');
-                    }
-
-                    options.headers.token = options.context.token;
-                }
-            ]
-        }
-    });
-
-    const context = {
-        token: 'secret'
-    };
-
-    const response = await instance('https://httpbin.org/headers', {context});
-
-    // Let's see the headers
-    console.log(response.body);
-    ```
-    */
-    get context() {
-        return this._internals.context;
-    }
-    set context(value) {
-        assert.object(value);
-        if (this._merging) {
-            Object.assign(this._internals.context, value);
-        }
-        else {
-            this._internals.context = { ...value };
-        }
-    }
-    /**
-    Hooks allow modifications during the request lifecycle.
-    Hook functions may be async and are run serially.
-    */
-    get hooks() {
-        return this._internals.hooks;
-    }
-    set hooks(value) {
-        assert.object(value);
-        // eslint-disable-next-line guard-for-in
-        for (const knownHookEvent in value) {
-            if (!(knownHookEvent in this._internals.hooks)) {
-                throw new Error(`Unexpected hook event: ${knownHookEvent}`);
-            }
-            const typedKnownHookEvent = knownHookEvent;
-            const hooks = value[typedKnownHookEvent];
-            assert.any([dist.array, dist.undefined], hooks);
-            if (hooks) {
-                for (const hook of hooks) {
-                    assert.function_(hook);
-                }
-            }
-            if (this._merging) {
-                if (hooks) {
-                    // @ts-expect-error FIXME
-                    this._internals.hooks[typedKnownHookEvent].push(...hooks);
-                }
-            }
-            else {
-                if (!hooks) {
-                    throw new Error(`Missing hook event: ${knownHookEvent}`);
-                }
-                // @ts-expect-error FIXME
-                this._internals.hooks[knownHookEvent] = [...hooks];
-            }
-        }
-    }
-    /**
-    Defines if redirect responses should be followed automatically.
-
-    Note that if a `303` is sent by the server in response to any request type (`POST`, `DELETE`, etc.), Got will automatically request the resource pointed to in the location header via `GET`.
-    This is in accordance with [the spec](https://tools.ietf.org/html/rfc7231#section-6.4.4). You can optionally turn on this behavior also for other redirect codes - see `methodRewriting`.
-
-    @default true
-    */
-    get followRedirect() {
-        return this._internals.followRedirect;
-    }
-    set followRedirect(value) {
-        assert.boolean(value);
-        this._internals.followRedirect = value;
-    }
-    get followRedirects() {
-        throw new TypeError('The `followRedirects` option does not exist. Use `followRedirect` instead.');
-    }
-    set followRedirects(_value) {
-        throw new TypeError('The `followRedirects` option does not exist. Use `followRedirect` instead.');
-    }
-    /**
-    If exceeded, the request will be aborted and a `MaxRedirectsError` will be thrown.
-
-    @default 10
-    */
-    get maxRedirects() {
-        return this._internals.maxRedirects;
-    }
-    set maxRedirects(value) {
-        assert.number(value);
-        this._internals.maxRedirects = value;
-    }
-    /**
-    A cache adapter instance for storing cached response data.
-
-    @default false
-    */
-    get cache() {
-        return this._internals.cache;
-    }
-    set cache(value) {
-        assert.any([dist.object, dist.string, dist.boolean, dist.undefined], value);
-        if (value === true) {
-            this._internals.cache = globalCache;
-        }
-        else if (value === false) {
-            this._internals.cache = undefined;
-        }
-        else {
-            this._internals.cache = value;
-        }
-    }
-    /**
-    Determines if a `got.HTTPError` is thrown for unsuccessful responses.
-
-    If this is disabled, requests that encounter an error status code will be resolved with the `response` instead of throwing.
-    This may be useful if you are checking for resource availability and are expecting error responses.
-
-    @default true
-    */
-    get throwHttpErrors() {
-        return this._internals.throwHttpErrors;
-    }
-    set throwHttpErrors(value) {
-        assert.boolean(value);
-        this._internals.throwHttpErrors = value;
-    }
-    get username() {
-        const url = this._internals.url;
-        const value = url ? url.username : this._internals.username;
-        return decodeURIComponent(value);
-    }
-    set username(value) {
-        assert.string(value);
-        const url = this._internals.url;
-        const fixedValue = encodeURIComponent(value);
-        if (url) {
-            url.username = fixedValue;
-        }
-        else {
-            this._internals.username = fixedValue;
-        }
-    }
-    get password() {
-        const url = this._internals.url;
-        const value = url ? url.password : this._internals.password;
-        return decodeURIComponent(value);
-    }
-    set password(value) {
-        assert.string(value);
-        const url = this._internals.url;
-        const fixedValue = encodeURIComponent(value);
-        if (url) {
-            url.password = fixedValue;
-        }
-        else {
-            this._internals.password = fixedValue;
-        }
-    }
-    /**
-    If set to `true`, Got will additionally accept HTTP2 requests.
-
-    It will choose either HTTP/1.1 or HTTP/2 depending on the ALPN protocol.
-
-    __Note__: This option requires Node.js 15.10.0 or newer as HTTP/2 support on older Node.js versions is very buggy.
-
-    __Note__: Overriding `options.request` will disable HTTP2 support.
-
-    @default false
-
-    @example
-    ```
-    import got from 'got';
-
-    const {headers} = await got('https://nghttp2.org/httpbin/anything', {http2: true});
-
-    console.log(headers.via);
-    //=> '2 nghttpx'
-    ```
-    */
-    get http2() {
-        return this._internals.http2;
-    }
-    set http2(value) {
-        assert.boolean(value);
-        this._internals.http2 = value;
-    }
-    /**
-    Set this to `true` to allow sending body for the `GET` method.
-    However, the [HTTP/2 specification](https://tools.ietf.org/html/rfc7540#section-8.1.3) says that `An HTTP GET request includes request header fields and no payload body`, therefore when using the HTTP/2 protocol this option will have no effect.
-    This option is only meant to interact with non-compliant servers when you have no other choice.
-
-    __Note__: The [RFC 7231](https://tools.ietf.org/html/rfc7231#section-4.3.1) doesn't specify any particular behavior for the GET method having a payload, therefore __it's considered an [anti-pattern](https://en.wikipedia.org/wiki/Anti-pattern)__.
-
-    @default false
-    */
-    get allowGetBody() {
-        return this._internals.allowGetBody;
-    }
-    set allowGetBody(value) {
-        assert.boolean(value);
-        this._internals.allowGetBody = value;
-    }
-    /**
-    Request headers.
-
-    Existing headers will be overwritten. Headers set to `undefined` will be omitted.
-
-    @default {}
-    */
-    get headers() {
-        return this._internals.headers;
-    }
-    set headers(value) {
-        assert.plainObject(value);
-        if (this._merging) {
-            Object.assign(this._internals.headers, lowercaseKeys(value));
-        }
-        else {
-            this._internals.headers = lowercaseKeys(value);
-        }
-    }
-    /**
-    Specifies if the HTTP request method should be [rewritten as `GET`](https://tools.ietf.org/html/rfc7231#section-6.4) on redirects.
-
-    As the [specification](https://tools.ietf.org/html/rfc7231#section-6.4) prefers to rewrite the HTTP method only on `303` responses, this is Got's default behavior.
-    Setting `methodRewriting` to `true` will also rewrite `301` and `302` responses, as allowed by the spec. This is the behavior followed by `curl` and browsers.
-
-    __Note__: Got never performs method rewriting on `307` and `308` responses, as this is [explicitly prohibited by the specification](https://www.rfc-editor.org/rfc/rfc7231#section-6.4.7).
-
-    @default false
-    */
-    get methodRewriting() {
-        return this._internals.methodRewriting;
-    }
-    set methodRewriting(value) {
-        assert.boolean(value);
-        this._internals.methodRewriting = value;
-    }
-    /**
-    Indicates which DNS record family to use.
-
-    Values:
-    - `undefined`: IPv4 (if present) or IPv6
-    - `4`: Only IPv4
-    - `6`: Only IPv6
-
-    @default undefined
-    */
-    get dnsLookupIpVersion() {
-        return this._internals.dnsLookupIpVersion;
-    }
-    set dnsLookupIpVersion(value) {
-        if (value !== undefined && value !== 4 && value !== 6) {
-            throw new TypeError(`Invalid DNS lookup IP version: ${value}`);
-        }
-        this._internals.dnsLookupIpVersion = value;
-    }
-    /**
-    A function used to parse JSON responses.
-
-    @example
-    ```
-    import got from 'got';
-    import Bourne from '@hapi/bourne';
-
-    const parsed = await got('https://example.com', {
-        parseJson: text => Bourne.parse(text)
-    }).json();
-
-    console.log(parsed);
-    ```
-    */
-    get parseJson() {
-        return this._internals.parseJson;
-    }
-    set parseJson(value) {
-        assert.function_(value);
-        this._internals.parseJson = value;
-    }
-    /**
-    A function used to stringify the body of JSON requests.
-
-    @example
-    ```
-    import got from 'got';
-
-    await got.post('https://example.com', {
-        stringifyJson: object => JSON.stringify(object, (key, value) => {
-            if (key.startsWith('_')) {
-                return;
-            }
-
-            return value;
-        }),
-        json: {
-            some: 'payload',
-            _ignoreMe: 1234
-        }
-    });
-    ```
-
-    @example
-    ```
-    import got from 'got';
-
-    await got.post('https://example.com', {
-        stringifyJson: object => JSON.stringify(object, (key, value) => {
-            if (typeof value === 'number') {
-                return value.toString();
-            }
-
-            return value;
-        }),
-        json: {
-            some: 'payload',
-            number: 1
-        }
-    });
-    ```
-    */
-    get stringifyJson() {
-        return this._internals.stringifyJson;
-    }
-    set stringifyJson(value) {
-        assert.function_(value);
-        this._internals.stringifyJson = value;
-    }
-    /**
-    An object representing `limit`, `calculateDelay`, `methods`, `statusCodes`, `maxRetryAfter` and `errorCodes` fields for maximum retry count, retry handler, allowed methods, allowed status codes, maximum [`Retry-After`](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Retry-After) time and allowed error codes.
-
-    Delays between retries counts with function `1000 * Math.pow(2, retry) + Math.random() * 100`, where `retry` is attempt number (starts from 1).
-
-    The `calculateDelay` property is a `function` that receives an object with `attemptCount`, `retryOptions`, `error` and `computedValue` properties for current retry count, the retry options, error and default computed value.
-    The function must return a delay in milliseconds (or a Promise resolving with it) (`0` return value cancels retry).
-
-    By default, it retries *only* on the specified methods, status codes, and on these network errors:
-
-    - `ETIMEDOUT`: One of the [timeout](#timeout) limits were reached.
-    - `ECONNRESET`: Connection was forcibly closed by a peer.
-    - `EADDRINUSE`: Could not bind to any free port.
-    - `ECONNREFUSED`: Connection was refused by the server.
-    - `EPIPE`: The remote side of the stream being written has been closed.
-    - `ENOTFOUND`: Couldn't resolve the hostname to an IP address.
-    - `ENETUNREACH`: No internet connection.
-    - `EAI_AGAIN`: DNS lookup timed out.
-
-    __Note__: If `maxRetryAfter` is set to `undefined`, it will use `options.timeout`.
-    __Note__: If [`Retry-After`](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Retry-After) header is greater than `maxRetryAfter`, it will cancel the request.
-    */
-    get retry() {
-        return this._internals.retry;
-    }
-    set retry(value) {
-        assert.plainObject(value);
-        assert.any([dist.function_, dist.undefined], value.calculateDelay);
-        assert.any([dist.number, dist.undefined], value.maxRetryAfter);
-        assert.any([dist.number, dist.undefined], value.limit);
-        assert.any([dist.array, dist.undefined], value.methods);
-        assert.any([dist.array, dist.undefined], value.statusCodes);
-        assert.any([dist.array, dist.undefined], value.errorCodes);
-        assert.any([dist.number, dist.undefined], value.noise);
-        if (value.noise && Math.abs(value.noise) > 100) {
-            throw new Error(`The maximum acceptable retry noise is +/- 100ms, got ${value.noise}`);
-        }
-        for (const key in value) {
-            if (!(key in this._internals.retry)) {
-                throw new Error(`Unexpected retry option: ${key}`);
-            }
-        }
-        if (this._merging) {
-            Object.assign(this._internals.retry, value);
-        }
-        else {
-            this._internals.retry = { ...value };
-        }
-        const { retry } = this._internals;
-        retry.methods = [...new Set(retry.methods.map(method => method.toUpperCase()))];
-        retry.statusCodes = [...new Set(retry.statusCodes)];
-        retry.errorCodes = [...new Set(retry.errorCodes)];
-    }
-    /**
-    From `http.RequestOptions`.
-
-    The IP address used to send the request from.
-    */
-    get localAddress() {
-        return this._internals.localAddress;
-    }
-    set localAddress(value) {
-        assert.any([dist.string, dist.undefined], value);
-        this._internals.localAddress = value;
-    }
-    /**
-    The HTTP method used to make the request.
-
-    @default 'GET'
-    */
-    get method() {
-        return this._internals.method;
-    }
-    set method(value) {
-        assert.string(value);
-        this._internals.method = value.toUpperCase();
-    }
-    get createConnection() {
-        return this._internals.createConnection;
-    }
-    set createConnection(value) {
-        assert.any([dist.function_, dist.undefined], value);
-        this._internals.createConnection = value;
-    }
-    /**
-    From `http-cache-semantics`
-
-    @default {}
-    */
-    get cacheOptions() {
-        return this._internals.cacheOptions;
-    }
-    set cacheOptions(value) {
-        assert.plainObject(value);
-        assert.any([dist.boolean, dist.undefined], value.shared);
-        assert.any([dist.number, dist.undefined], value.cacheHeuristic);
-        assert.any([dist.number, dist.undefined], value.immutableMinTimeToLive);
-        assert.any([dist.boolean, dist.undefined], value.ignoreCargoCult);
-        for (const key in value) {
-            if (!(key in this._internals.cacheOptions)) {
-                throw new Error(`Cache option \`${key}\` does not exist`);
-            }
-        }
-        if (this._merging) {
-            Object.assign(this._internals.cacheOptions, value);
-        }
-        else {
-            this._internals.cacheOptions = { ...value };
-        }
-    }
-    /**
-    Options for the advanced HTTPS API.
-    */
-    get https() {
-        return this._internals.https;
-    }
-    set https(value) {
-        assert.plainObject(value);
-        assert.any([dist.boolean, dist.undefined], value.rejectUnauthorized);
-        assert.any([dist.function_, dist.undefined], value.checkServerIdentity);
-        assert.any([dist.string, dist.object, dist.array, dist.undefined], value.certificateAuthority);
-        assert.any([dist.string, dist.object, dist.array, dist.undefined], value.key);
-        assert.any([dist.string, dist.object, dist.array, dist.undefined], value.certificate);
-        assert.any([dist.string, dist.undefined], value.passphrase);
-        assert.any([dist.string, dist.buffer, dist.array, dist.undefined], value.pfx);
-        assert.any([dist.array, dist.undefined], value.alpnProtocols);
-        assert.any([dist.string, dist.undefined], value.ciphers);
-        assert.any([dist.string, dist.buffer, dist.undefined], value.dhparam);
-        assert.any([dist.string, dist.undefined], value.signatureAlgorithms);
-        assert.any([dist.string, dist.undefined], value.minVersion);
-        assert.any([dist.string, dist.undefined], value.maxVersion);
-        assert.any([dist.boolean, dist.undefined], value.honorCipherOrder);
-        assert.any([dist.number, dist.undefined], value.tlsSessionLifetime);
-        assert.any([dist.string, dist.undefined], value.ecdhCurve);
-        assert.any([dist.string, dist.buffer, dist.array, dist.undefined], value.certificateRevocationLists);
-        for (const key in value) {
-            if (!(key in this._internals.https)) {
-                throw new Error(`HTTPS option \`${key}\` does not exist`);
-            }
-        }
-        if (this._merging) {
-            Object.assign(this._internals.https, value);
-        }
-        else {
-            this._internals.https = { ...value };
-        }
-    }
-    /**
-    [Encoding](https://nodejs.org/api/buffer.html#buffer_buffers_and_character_encodings) to be used on `setEncoding` of the response data.
-
-    To get a [`Buffer`](https://nodejs.org/api/buffer.html), you need to set `responseType` to `buffer` instead.
-    Don't set this option to `null`.
-
-    __Note__: This doesn't affect streams! Instead, you need to do `got.stream(...).setEncoding(encoding)`.
-
-    @default 'utf-8'
-    */
-    get encoding() {
-        return this._internals.encoding;
-    }
-    set encoding(value) {
-        if (value === null) {
-            throw new TypeError('To get a Buffer, set `options.responseType` to `buffer` instead');
-        }
-        assert.any([dist.string, dist.undefined], value);
-        this._internals.encoding = value;
-    }
-    /**
-    When set to `true` the promise will return the Response body instead of the Response object.
-
-    @default false
-    */
-    get resolveBodyOnly() {
-        return this._internals.resolveBodyOnly;
-    }
-    set resolveBodyOnly(value) {
-        assert.boolean(value);
-        this._internals.resolveBodyOnly = value;
-    }
-    /**
-    Returns a `Stream` instead of a `Promise`.
-    This is equivalent to calling `got.stream(url, options?)`.
-
-    @default false
-    */
-    get isStream() {
-        return this._internals.isStream;
-    }
-    set isStream(value) {
-        assert.boolean(value);
-        this._internals.isStream = value;
-    }
-    /**
-    The parsing method.
-
-    The promise also has `.text()`, `.json()` and `.buffer()` methods which return another Got promise for the parsed body.
-
-    It's like setting the options to `{responseType: 'json', resolveBodyOnly: true}` but without affecting the main Got promise.
-
-    __Note__: When using streams, this option is ignored.
-
-    @example
-    ```
-    const responsePromise = got(url);
-    const bufferPromise = responsePromise.buffer();
-    const jsonPromise = responsePromise.json();
-
-    const [response, buffer, json] = Promise.all([responsePromise, bufferPromise, jsonPromise]);
-    // `response` is an instance of Got Response
-    // `buffer` is an instance of Buffer
-    // `json` is an object
-    ```
-
-    @example
-    ```
-    // This
-    const body = await got(url).json();
-
-    // is semantically the same as this
-    const body = await got(url, {responseType: 'json', resolveBodyOnly: true});
-    ```
-    */
-    get responseType() {
-        return this._internals.responseType;
-    }
-    set responseType(value) {
-        if (value === undefined) {
-            this._internals.responseType = 'text';
-            return;
-        }
-        if (value !== 'text' && value !== 'buffer' && value !== 'json') {
-            throw new Error(`Invalid \`responseType\` option: ${value}`);
-        }
-        this._internals.responseType = value;
-    }
-    get pagination() {
-        return this._internals.pagination;
-    }
-    set pagination(value) {
-        assert.object(value);
-        if (this._merging) {
-            Object.assign(this._internals.pagination, value);
-        }
-        else {
-            this._internals.pagination = value;
-        }
-    }
-    get auth() {
-        throw new Error('Parameter `auth` is deprecated. Use `username` / `password` instead.');
-    }
-    set auth(_value) {
-        throw new Error('Parameter `auth` is deprecated. Use `username` / `password` instead.');
-    }
-    get setHost() {
-        return this._internals.setHost;
-    }
-    set setHost(value) {
-        assert.boolean(value);
-        this._internals.setHost = value;
-    }
-    get maxHeaderSize() {
-        return this._internals.maxHeaderSize;
-    }
-    set maxHeaderSize(value) {
-        assert.any([dist.number, dist.undefined], value);
-        this._internals.maxHeaderSize = value;
-    }
-    get enableUnixSockets() {
-        return this._internals.enableUnixSockets;
-    }
-    set enableUnixSockets(value) {
-        assert.boolean(value);
-        this._internals.enableUnixSockets = value;
-    }
-    // eslint-disable-next-line @typescript-eslint/naming-convention
-    toJSON() {
-        return { ...this._internals };
-    }
-    [Symbol.for('nodejs.util.inspect.custom')](_depth, options) {
-        return (0,external_node_util_namespaceObject.inspect)(this._internals, options);
-    }
-    createNativeRequestOptions() {
-        const internals = this._internals;
-        const url = internals.url;
-        let agent;
-        if (url.protocol === 'https:') {
-            agent = internals.http2 ? internals.agent : internals.agent.https;
-        }
-        else {
-            agent = internals.agent.http;
-        }
-        const { https } = internals;
-        let { pfx } = https;
-        if (dist.array(pfx) && dist.plainObject(pfx[0])) {
-            pfx = pfx.map(object => ({
-                buf: object.buffer,
-                passphrase: object.passphrase,
-            }));
-        }
-        return {
-            ...internals.cacheOptions,
-            ...this._unixOptions,
-            // HTTPS options
-            // eslint-disable-next-line @typescript-eslint/naming-convention
-            ALPNProtocols: https.alpnProtocols,
-            ca: https.certificateAuthority,
-            cert: https.certificate,
-            key: https.key,
-            passphrase: https.passphrase,
-            pfx: https.pfx,
-            rejectUnauthorized: https.rejectUnauthorized,
-            checkServerIdentity: https.checkServerIdentity ?? external_node_tls_namespaceObject.checkServerIdentity,
-            ciphers: https.ciphers,
-            honorCipherOrder: https.honorCipherOrder,
-            minVersion: https.minVersion,
-            maxVersion: https.maxVersion,
-            sigalgs: https.signatureAlgorithms,
-            sessionTimeout: https.tlsSessionLifetime,
-            dhparam: https.dhparam,
-            ecdhCurve: https.ecdhCurve,
-            crl: https.certificateRevocationLists,
-            // HTTP options
-            lookup: internals.dnsLookup ?? internals.dnsCache?.lookup,
-            family: internals.dnsLookupIpVersion,
-            agent,
-            setHost: internals.setHost,
-            method: internals.method,
-            maxHeaderSize: internals.maxHeaderSize,
-            localAddress: internals.localAddress,
-            headers: internals.headers,
-            createConnection: internals.createConnection,
-            timeout: internals.http2 ? getHttp2TimeoutOption(internals) : undefined,
-            // HTTP/2 options
-            h2session: internals.h2session,
-        };
-    }
-    getRequestFunction() {
-        const url = this._internals.url;
-        const { request } = this._internals;
-        if (!request && url) {
-            return this.getFallbackRequestFunction();
-        }
-        return request;
-    }
-    getFallbackRequestFunction() {
-        const url = this._internals.url;
-        if (!url) {
-            return;
-        }
-        if (url.protocol === 'https:') {
-            if (this._internals.http2) {
-                if (major < 15 || (major === 15 && minor < 10)) {
-                    const error = new Error('To use the `http2` option, install Node.js 15.10.0 or above');
-                    error.code = 'EUNSUPPORTED';
-                    throw error;
-                }
-                return http2_wrapper_source.auto;
-            }
-            return external_node_https_namespaceObject.request;
-        }
-        return external_node_http_namespaceObject.request;
-    }
-    freeze() {
-        const options = this._internals;
-        Object.freeze(options);
-        Object.freeze(options.hooks);
-        Object.freeze(options.hooks.afterResponse);
-        Object.freeze(options.hooks.beforeError);
-        Object.freeze(options.hooks.beforeRedirect);
-        Object.freeze(options.hooks.beforeRequest);
-        Object.freeze(options.hooks.beforeRetry);
-        Object.freeze(options.hooks.init);
-        Object.freeze(options.https);
-        Object.freeze(options.cacheOptions);
-        Object.freeze(options.agent);
-        Object.freeze(options.headers);
-        Object.freeze(options.timeout);
-        Object.freeze(options.retry);
-        Object.freeze(options.retry.errorCodes);
-        Object.freeze(options.retry.methods);
-        Object.freeze(options.retry.statusCodes);
-    }
-}
-
-;// CONCATENATED MODULE: ./node_modules/got/dist/source/core/response.js
-
-const isResponseOk = (response) => {
-    const { statusCode } = response;
-    const limitStatusCode = response.request.options.followRedirect ? 299 : 399;
-    return (statusCode >= 200 && statusCode <= limitStatusCode) || statusCode === 304;
-};
-/**
-An error to be thrown when server response code is 2xx, and parsing body fails.
-Includes a `response` property.
-*/
-class ParseError extends RequestError {
-    constructor(error, response) {
-        const { options } = response.request;
-        super(`${error.message} in "${options.url.toString()}"`, error, response.request);
-        this.name = 'ParseError';
-        this.code = 'ERR_BODY_PARSE_FAILURE';
-    }
-}
-const parseBody = (response, responseType, parseJson, encoding) => {
-    const { rawBody } = response;
-    try {
-        if (responseType === 'text') {
-            return rawBody.toString(encoding);
-        }
-        if (responseType === 'json') {
-            return rawBody.length === 0 ? '' : parseJson(rawBody.toString(encoding));
-        }
-        if (responseType === 'buffer') {
-            return rawBody;
-        }
-    }
-    catch (error) {
-        throw new ParseError(error, response);
-    }
-    throw new ParseError({
-        message: `Unknown body type '${responseType}'`,
-        name: 'Error',
-    }, response);
-};
-
-;// CONCATENATED MODULE: ./node_modules/got/dist/source/core/utils/is-client-request.js
-function isClientRequest(clientRequest) {
-    return clientRequest.writable && !clientRequest.writableEnded;
-}
-/* harmony default export */ const is_client_request = (isClientRequest);
-
-;// CONCATENATED MODULE: ./node_modules/got/dist/source/core/utils/is-unix-socket-url.js
-// eslint-disable-next-line @typescript-eslint/naming-convention
-function isUnixSocketURL(url) {
-    return url.protocol === 'unix:' || url.hostname === 'unix';
-}
-
-;// CONCATENATED MODULE: ./node_modules/got/dist/source/core/index.js
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-const supportsBrotli = dist.string(external_node_process_namespaceObject.versions.brotli);
-const methodsWithoutBody = new Set(['GET', 'HEAD']);
-const cacheableStore = new WeakableMap();
-const redirectCodes = new Set([300, 301, 302, 303, 304, 307, 308]);
-const proxiedRequestEvents = [
-    'socket',
-    'connect',
-    'continue',
-    'information',
-    'upgrade',
-];
-const core_noop = () => { };
-class Request extends external_node_stream_namespaceObject.Duplex {
-    constructor(url, options, defaults) {
-        super({
-            // Don't destroy immediately, as the error may be emitted on unsuccessful retry
-            autoDestroy: false,
-            // It needs to be zero because we're just proxying the data to another stream
-            highWaterMark: 0,
-        });
-        // @ts-expect-error - Ignoring for now.
-        Object.defineProperty(this, 'constructor', {
-            enumerable: true,
-            configurable: true,
-            writable: true,
-            value: void 0
-        });
-        Object.defineProperty(this, "_noPipe", {
-            enumerable: true,
-            configurable: true,
-            writable: true,
-            value: void 0
-        });
-        // @ts-expect-error https://github.com/microsoft/TypeScript/issues/9568
-        Object.defineProperty(this, "options", {
-            enumerable: true,
-            configurable: true,
-            writable: true,
-            value: void 0
-        });
-        Object.defineProperty(this, "response", {
-            enumerable: true,
-            configurable: true,
-            writable: true,
-            value: void 0
-        });
-        Object.defineProperty(this, "requestUrl", {
-            enumerable: true,
-            configurable: true,
-            writable: true,
-            value: void 0
-        });
-        Object.defineProperty(this, "redirectUrls", {
-            enumerable: true,
-            configurable: true,
-            writable: true,
-            value: void 0
-        });
-        Object.defineProperty(this, "retryCount", {
-            enumerable: true,
-            configurable: true,
-            writable: true,
-            value: void 0
-        });
-        Object.defineProperty(this, "_stopRetry", {
-            enumerable: true,
-            configurable: true,
-            writable: true,
-            value: void 0
-        });
-        Object.defineProperty(this, "_downloadedSize", {
-            enumerable: true,
-            configurable: true,
-            writable: true,
-            value: void 0
-        });
-        Object.defineProperty(this, "_uploadedSize", {
-            enumerable: true,
-            configurable: true,
-            writable: true,
-            value: void 0
-        });
-        Object.defineProperty(this, "_stopReading", {
-            enumerable: true,
-            configurable: true,
-            writable: true,
-            value: void 0
-        });
-        Object.defineProperty(this, "_pipedServerResponses", {
-            enumerable: true,
-            configurable: true,
-            writable: true,
-            value: void 0
-        });
-        Object.defineProperty(this, "_request", {
-            enumerable: true,
-            configurable: true,
-            writable: true,
-            value: void 0
-        });
-        Object.defineProperty(this, "_responseSize", {
-            enumerable: true,
-            configurable: true,
-            writable: true,
-            value: void 0
-        });
-        Object.defineProperty(this, "_bodySize", {
-            enumerable: true,
-            configurable: true,
-            writable: true,
-            value: void 0
-        });
-        Object.defineProperty(this, "_unproxyEvents", {
-            enumerable: true,
-            configurable: true,
-            writable: true,
-            value: void 0
-        });
-        Object.defineProperty(this, "_isFromCache", {
-            enumerable: true,
-            configurable: true,
-            writable: true,
-            value: void 0
-        });
-        Object.defineProperty(this, "_cannotHaveBody", {
-            enumerable: true,
-            configurable: true,
-            writable: true,
-            value: void 0
-        });
-        Object.defineProperty(this, "_triggerRead", {
-            enumerable: true,
-            configurable: true,
-            writable: true,
-            value: void 0
-        });
-        Object.defineProperty(this, "_cancelTimeouts", {
-            enumerable: true,
-            configurable: true,
-            writable: true,
-            value: void 0
-        });
-        Object.defineProperty(this, "_removeListeners", {
-            enumerable: true,
-            configurable: true,
-            writable: true,
-            value: void 0
-        });
-        Object.defineProperty(this, "_nativeResponse", {
-            enumerable: true,
-            configurable: true,
-            writable: true,
-            value: void 0
-        });
-        Object.defineProperty(this, "_flushed", {
-            enumerable: true,
-            configurable: true,
-            writable: true,
-            value: void 0
-        });
-        Object.defineProperty(this, "_aborted", {
-            enumerable: true,
-            configurable: true,
-            writable: true,
-            value: void 0
-        });
-        // We need this because `this._request` if `undefined` when using cache
-        Object.defineProperty(this, "_requestInitialized", {
-            enumerable: true,
-            configurable: true,
-            writable: true,
-            value: void 0
-        });
-        this._downloadedSize = 0;
-        this._uploadedSize = 0;
-        this._stopReading = false;
-        this._pipedServerResponses = new Set();
-        this._cannotHaveBody = false;
-        this._unproxyEvents = core_noop;
-        this._triggerRead = false;
-        this._cancelTimeouts = core_noop;
-        this._removeListeners = core_noop;
-        this._jobs = [];
-        this._flushed = false;
-        this._requestInitialized = false;
-        this._aborted = false;
-        this.redirectUrls = [];
-        this.retryCount = 0;
-        this._stopRetry = core_noop;
-        this.on('pipe', source => {
-            if (source.headers) {
-                Object.assign(this.options.headers, source.headers);
-            }
-        });
-        this.on('newListener', event => {
-            if (event === 'retry' && this.listenerCount('retry') > 0) {
-                throw new Error('A retry listener has been attached already.');
-            }
-        });
-        try {
-            this.options = new Options(url, options, defaults);
-            if (!this.options.url) {
-                if (this.options.prefixUrl === '') {
-                    throw new TypeError('Missing `url` property');
-                }
-                this.options.url = '';
-            }
-            this.requestUrl = this.options.url;
-        }
-        catch (error) {
-            const { options } = error;
-            if (options) {
-                this.options = options;
-            }
-            this.flush = async () => {
-                this.flush = async () => { };
-                this.destroy(error);
-            };
-            return;
-        }
-        // Important! If you replace `body` in a handler with another stream, make sure it's readable first.
-        // The below is run only once.
-        const { body } = this.options;
-        if (dist.nodeStream(body)) {
-            body.once('error', error => {
-                if (this._flushed) {
-                    this._beforeError(new UploadError(error, this));
-                }
-                else {
-                    this.flush = async () => {
-                        this.flush = async () => { };
-                        this._beforeError(new UploadError(error, this));
-                    };
-                }
-            });
-        }
-        if (this.options.signal) {
-            const abort = () => {
-                this.destroy(new AbortError(this));
-            };
-            if (this.options.signal.aborted) {
-                abort();
-            }
-            else {
-                this.options.signal.addEventListener('abort', abort);
-                this._removeListeners = () => {
-                    this.options.signal.removeEventListener('abort', abort);
-                };
-            }
-        }
-    }
-    async flush() {
-        if (this._flushed) {
-            return;
-        }
-        this._flushed = true;
-        try {
-            await this._finalizeBody();
-            if (this.destroyed) {
-                return;
-            }
-            await this._makeRequest();
-            if (this.destroyed) {
-                this._request?.destroy();
-                return;
-            }
-            // Queued writes etc.
-            for (const job of this._jobs) {
-                job();
-            }
-            // Prevent memory leak
-            this._jobs.length = 0;
-            this._requestInitialized = true;
-        }
-        catch (error) {
-            this._beforeError(error);
-        }
-    }
-    _beforeError(error) {
-        if (this._stopReading) {
-            return;
-        }
-        const { response, options } = this;
-        const attemptCount = this.retryCount + (error.name === 'RetryError' ? 0 : 1);
-        this._stopReading = true;
-        if (!(error instanceof RequestError)) {
-            error = new RequestError(error.message, error, this);
-        }
-        const typedError = error;
-        void (async () => {
-            // Node.js parser is really weird.
-            // It emits post-request Parse Errors on the same instance as previous request. WTF.
-            // Therefore we need to check if it has been destroyed as well.
-            //
-            // Furthermore, Node.js 16 `response.destroy()` doesn't immediately destroy the socket,
-            // but makes the response unreadable. So we additionally need to check `response.readable`.
-            if (response?.readable && !response.rawBody && !this._request?.socket?.destroyed) {
-                // @types/node has incorrect typings. `setEncoding` accepts `null` as well.
-                response.setEncoding(this.readableEncoding);
-                const success = await this._setRawBody(response);
-                if (success) {
-                    response.body = response.rawBody.toString();
-                }
-            }
-            if (this.listenerCount('retry') !== 0) {
-                let backoff;
-                try {
-                    let retryAfter;
-                    if (response && 'retry-after' in response.headers) {
-                        retryAfter = Number(response.headers['retry-after']);
-                        if (Number.isNaN(retryAfter)) {
-                            retryAfter = Date.parse(response.headers['retry-after']) - Date.now();
-                            if (retryAfter <= 0) {
-                                retryAfter = 1;
-                            }
-                        }
-                        else {
-                            retryAfter *= 1000;
-                        }
-                    }
-                    const retryOptions = options.retry;
-                    backoff = await retryOptions.calculateDelay({
-                        attemptCount,
-                        retryOptions,
-                        error: typedError,
-                        retryAfter,
-                        computedValue: calculate_retry_delay({
-                            attemptCount,
-                            retryOptions,
-                            error: typedError,
-                            retryAfter,
-                            computedValue: retryOptions.maxRetryAfter ?? options.timeout.request ?? Number.POSITIVE_INFINITY,
-                        }),
-                    });
-                }
-                catch (error_) {
-                    void this._error(new RequestError(error_.message, error_, this));
-                    return;
-                }
-                if (backoff) {
-                    await new Promise(resolve => {
-                        const timeout = setTimeout(resolve, backoff);
-                        this._stopRetry = () => {
-                            clearTimeout(timeout);
-                            resolve();
-                        };
-                    });
-                    // Something forced us to abort the retry
-                    if (this.destroyed) {
-                        return;
-                    }
-                    try {
-                        for (const hook of this.options.hooks.beforeRetry) {
-                            // eslint-disable-next-line no-await-in-loop
-                            await hook(typedError, this.retryCount + 1);
-                        }
-                    }
-                    catch (error_) {
-                        void this._error(new RequestError(error_.message, error, this));
-                        return;
-                    }
-                    // Something forced us to abort the retry
-                    if (this.destroyed) {
-                        return;
-                    }
-                    this.destroy();
-                    this.emit('retry', this.retryCount + 1, error, (updatedOptions) => {
-                        const request = new Request(options.url, updatedOptions, options);
-                        request.retryCount = this.retryCount + 1;
-                        external_node_process_namespaceObject.nextTick(() => {
-                            void request.flush();
-                        });
-                        return request;
-                    });
-                    return;
-                }
-            }
-            void this._error(typedError);
-        })();
-    }
-    _read() {
-        this._triggerRead = true;
-        const { response } = this;
-        if (response && !this._stopReading) {
-            // We cannot put this in the `if` above
-            // because `.read()` also triggers the `end` event
-            if (response.readableLength) {
-                this._triggerRead = false;
-            }
-            let data;
-            while ((data = response.read()) !== null) {
-                this._downloadedSize += data.length; // eslint-disable-line @typescript-eslint/restrict-plus-operands
-                const progress = this.downloadProgress;
-                if (progress.percent < 1) {
-                    this.emit('downloadProgress', progress);
-                }
-                this.push(data);
-            }
-        }
-    }
-    _write(chunk, encoding, callback) {
-        const write = () => {
-            this._writeRequest(chunk, encoding, callback);
-        };
-        if (this._requestInitialized) {
-            write();
-        }
-        else {
-            this._jobs.push(write);
-        }
-    }
-    _final(callback) {
-        const endRequest = () => {
-            // We need to check if `this._request` is present,
-            // because it isn't when we use cache.
-            if (!this._request || this._request.destroyed) {
-                callback();
-                return;
-            }
-            this._request.end((error) => {
-                // The request has been destroyed before `_final` finished.
-                // See https://github.com/nodejs/node/issues/39356
-                if (this._request._writableState?.errored) {
-                    return;
-                }
-                if (!error) {
-                    this._bodySize = this._uploadedSize;
-                    this.emit('uploadProgress', this.uploadProgress);
-                    this._request.emit('upload-complete');
-                }
-                callback(error);
-            });
-        };
-        if (this._requestInitialized) {
-            endRequest();
-        }
-        else {
-            this._jobs.push(endRequest);
-        }
-    }
-    _destroy(error, callback) {
-        this._stopReading = true;
-        this.flush = async () => { };
-        // Prevent further retries
-        this._stopRetry();
-        this._cancelTimeouts();
-        this._removeListeners();
-        if (this.options) {
-            const { body } = this.options;
-            if (dist.nodeStream(body)) {
-                body.destroy();
-            }
-        }
-        if (this._request) {
-            this._request.destroy();
-        }
-        if (error !== null && !dist.undefined(error) && !(error instanceof RequestError)) {
-            error = new RequestError(error.message, error, this);
-        }
-        callback(error);
-    }
-    pipe(destination, options) {
-        if (destination instanceof external_node_http_namespaceObject.ServerResponse) {
-            this._pipedServerResponses.add(destination);
-        }
-        return super.pipe(destination, options);
-    }
-    unpipe(destination) {
-        if (destination instanceof external_node_http_namespaceObject.ServerResponse) {
-            this._pipedServerResponses.delete(destination);
-        }
-        super.unpipe(destination);
-        return this;
-    }
-    async _finalizeBody() {
-        const { options } = this;
-        const { headers } = options;
-        const isForm = !dist.undefined(options.form);
-        // eslint-disable-next-line @typescript-eslint/naming-convention
-        const isJSON = !dist.undefined(options.json);
-        const isBody = !dist.undefined(options.body);
-        const cannotHaveBody = methodsWithoutBody.has(options.method) && !(options.method === 'GET' && options.allowGetBody);
-        this._cannotHaveBody = cannotHaveBody;
-        if (isForm || isJSON || isBody) {
-            if (cannotHaveBody) {
-                throw new TypeError(`The \`${options.method}\` method cannot be used with a body`);
-            }
-            // Serialize body
-            const noContentType = !dist.string(headers['content-type']);
-            if (isBody) {
-                // Body is spec-compliant FormData
-                if (isFormData(options.body)) {
-                    const encoder = new FormDataEncoder(options.body);
-                    if (noContentType) {
-                        headers['content-type'] = encoder.headers['Content-Type'];
-                    }
-                    if ('Content-Length' in encoder.headers) {
-                        headers['content-length'] = encoder.headers['Content-Length'];
-                    }
-                    options.body = encoder.encode();
-                }
-                // Special case for https://github.com/form-data/form-data
-                if (is_form_data_isFormData(options.body) && noContentType) {
-                    headers['content-type'] = `multipart/form-data; boundary=${options.body.getBoundary()}`;
-                }
-            }
-            else if (isForm) {
-                if (noContentType) {
-                    headers['content-type'] = 'application/x-www-form-urlencoded';
-                }
-                const { form } = options;
-                options.form = undefined;
-                options.body = (new external_node_url_namespaceObject.URLSearchParams(form)).toString();
-            }
-            else {
-                if (noContentType) {
-                    headers['content-type'] = 'application/json';
-                }
-                const { json } = options;
-                options.json = undefined;
-                options.body = options.stringifyJson(json);
-            }
-            const uploadBodySize = await getBodySize(options.body, options.headers);
-            // See https://tools.ietf.org/html/rfc7230#section-3.3.2
-            // A user agent SHOULD send a Content-Length in a request message when
-            // no Transfer-Encoding is sent and the request method defines a meaning
-            // for an enclosed payload body.  For example, a Content-Length header
-            // field is normally sent in a POST request even when the value is 0
-            // (indicating an empty payload body).  A user agent SHOULD NOT send a
-            // Content-Length header field when the request message does not contain
-            // a payload body and the method semantics do not anticipate such a
-            // body.
-            if (dist.undefined(headers['content-length']) && dist.undefined(headers['transfer-encoding']) && !cannotHaveBody && !dist.undefined(uploadBodySize)) {
-                headers['content-length'] = String(uploadBodySize);
-            }
-        }
-        if (options.responseType === 'json' && !('accept' in options.headers)) {
-            options.headers.accept = 'application/json';
-        }
-        this._bodySize = Number(headers['content-length']) || undefined;
-    }
-    async _onResponseBase(response) {
-        // This will be called e.g. when using cache so we need to check if this request has been aborted.
-        if (this.isAborted) {
-            return;
-        }
-        const { options } = this;
-        const { url } = options;
-        this._nativeResponse = response;
-        if (options.decompress) {
-            response = decompress_response(response);
-        }
-        const statusCode = response.statusCode;
-        const typedResponse = response;
-        typedResponse.statusMessage = typedResponse.statusMessage ? typedResponse.statusMessage : external_node_http_namespaceObject.STATUS_CODES[statusCode];
-        typedResponse.url = options.url.toString();
-        typedResponse.requestUrl = this.requestUrl;
-        typedResponse.redirectUrls = this.redirectUrls;
-        typedResponse.request = this;
-        typedResponse.isFromCache = this._nativeResponse.fromCache ?? false;
-        typedResponse.ip = this.ip;
-        typedResponse.retryCount = this.retryCount;
-        typedResponse.ok = isResponseOk(typedResponse);
-        this._isFromCache = typedResponse.isFromCache;
-        this._responseSize = Number(response.headers['content-length']) || undefined;
-        this.response = typedResponse;
-        response.once('end', () => {
-            this._responseSize = this._downloadedSize;
-            this.emit('downloadProgress', this.downloadProgress);
-        });
-        response.once('error', (error) => {
-            this._aborted = true;
-            // Force clean-up, because some packages don't do this.
-            // TODO: Fix decompress-response
-            response.destroy();
-            this._beforeError(new ReadError(error, this));
-        });
-        response.once('aborted', () => {
-            this._aborted = true;
-            this._beforeError(new ReadError({
-                name: 'Error',
-                message: 'The server aborted pending request',
-                code: 'ECONNRESET',
-            }, this));
-        });
-        this.emit('downloadProgress', this.downloadProgress);
-        const rawCookies = response.headers['set-cookie'];
-        if (dist.object(options.cookieJar) && rawCookies) {
-            let promises = rawCookies.map(async (rawCookie) => options.cookieJar.setCookie(rawCookie, url.toString()));
-            if (options.ignoreInvalidCookies) {
-                promises = promises.map(async (promise) => {
-                    try {
-                        await promise;
-                    }
-                    catch { }
-                });
-            }
-            try {
-                await Promise.all(promises);
-            }
-            catch (error) {
-                this._beforeError(error);
-                return;
-            }
-        }
-        // The above is running a promise, therefore we need to check if this request has been aborted yet again.
-        if (this.isAborted) {
-            return;
-        }
-        if (options.followRedirect && response.headers.location && redirectCodes.has(statusCode)) {
-            // We're being redirected, we don't care about the response.
-            // It'd be best to abort the request, but we can't because
-            // we would have to sacrifice the TCP connection. We don't want that.
-            response.resume();
-            this._cancelTimeouts();
-            this._unproxyEvents();
-            if (this.redirectUrls.length >= options.maxRedirects) {
-                this._beforeError(new MaxRedirectsError(this));
-                return;
-            }
-            this._request = undefined;
-            const updatedOptions = new Options(undefined, undefined, this.options);
-            const serverRequestedGet = statusCode === 303 && updatedOptions.method !== 'GET' && updatedOptions.method !== 'HEAD';
-            const canRewrite = statusCode !== 307 && statusCode !== 308;
-            const userRequestedGet = updatedOptions.methodRewriting && canRewrite;
-            if (serverRequestedGet || userRequestedGet) {
-                updatedOptions.method = 'GET';
-                updatedOptions.body = undefined;
-                updatedOptions.json = undefined;
-                updatedOptions.form = undefined;
-                delete updatedOptions.headers['content-length'];
-            }
-            try {
-                // We need this in order to support UTF-8
-                const redirectBuffer = external_node_buffer_namespaceObject.Buffer.from(response.headers.location, 'binary').toString();
-                const redirectUrl = new external_node_url_namespaceObject.URL(redirectBuffer, url);
-                if (!isUnixSocketURL(url) && isUnixSocketURL(redirectUrl)) {
-                    this._beforeError(new RequestError('Cannot redirect to UNIX socket', {}, this));
-                    return;
-                }
-                // Redirecting to a different site, clear sensitive data.
-                if (redirectUrl.hostname !== url.hostname || redirectUrl.port !== url.port) {
-                    if ('host' in updatedOptions.headers) {
-                        delete updatedOptions.headers.host;
-                    }
-                    if ('cookie' in updatedOptions.headers) {
-                        delete updatedOptions.headers.cookie;
-                    }
-                    if ('authorization' in updatedOptions.headers) {
-                        delete updatedOptions.headers.authorization;
-                    }
-                    if (updatedOptions.username || updatedOptions.password) {
-                        updatedOptions.username = '';
-                        updatedOptions.password = '';
-                    }
-                }
-                else {
-                    redirectUrl.username = updatedOptions.username;
-                    redirectUrl.password = updatedOptions.password;
-                }
-                this.redirectUrls.push(redirectUrl);
-                updatedOptions.prefixUrl = '';
-                updatedOptions.url = redirectUrl;
-                for (const hook of updatedOptions.hooks.beforeRedirect) {
-                    // eslint-disable-next-line no-await-in-loop
-                    await hook(updatedOptions, typedResponse);
-                }
-                this.emit('redirect', updatedOptions, typedResponse);
-                this.options = updatedOptions;
-                await this._makeRequest();
-            }
-            catch (error) {
-                this._beforeError(error);
-                return;
-            }
-            return;
-        }
-        // `HTTPError`s always have `error.response.body` defined.
-        // Therefore we cannot retry if `options.throwHttpErrors` is false.
-        // On the last retry, if `options.throwHttpErrors` is false, we would need to return the body,
-        // but that wouldn't be possible since the body would be already read in `error.response.body`.
-        if (options.isStream && options.throwHttpErrors && !isResponseOk(typedResponse)) {
-            this._beforeError(new HTTPError(typedResponse));
-            return;
-        }
-        response.on('readable', () => {
-            if (this._triggerRead) {
-                this._read();
-            }
-        });
-        this.on('resume', () => {
-            response.resume();
-        });
-        this.on('pause', () => {
-            response.pause();
-        });
-        response.once('end', () => {
-            this.push(null);
-        });
-        if (this._noPipe) {
-            const success = await this._setRawBody();
-            if (success) {
-                this.emit('response', response);
-            }
-            return;
-        }
-        this.emit('response', response);
-        for (const destination of this._pipedServerResponses) {
-            if (destination.headersSent) {
-                continue;
-            }
-            // eslint-disable-next-line guard-for-in
-            for (const key in response.headers) {
-                const isAllowed = options.decompress ? key !== 'content-encoding' : true;
-                const value = response.headers[key];
-                if (isAllowed) {
-                    destination.setHeader(key, value);
-                }
-            }
-            destination.statusCode = statusCode;
-        }
-    }
-    async _setRawBody(from = this) {
-        if (from.readableEnded) {
-            return false;
-        }
-        try {
-            // Errors are emitted via the `error` event
-            const rawBody = await (0,get_stream.buffer)(from);
-            // On retry Request is destroyed with no error, therefore the above will successfully resolve.
-            // So in order to check if this was really successfull, we need to check if it has been properly ended.
-            if (!this.isAborted) {
-                this.response.rawBody = rawBody;
-                return true;
-            }
-        }
-        catch { }
-        return false;
-    }
-    async _onResponse(response) {
-        try {
-            await this._onResponseBase(response);
-        }
-        catch (error) {
-            /* istanbul ignore next: better safe than sorry */
-            this._beforeError(error);
-        }
-    }
-    _onRequest(request) {
-        const { options } = this;
-        const { timeout, url } = options;
-        dist_source(request);
-        if (this.options.http2) {
-            // Unset stream timeout, as the `timeout` option was used only for connection timeout.
-            request.setTimeout(0);
-        }
-        this._cancelTimeouts = timedOut(request, timeout, url);
-        const responseEventName = options.cache ? 'cacheableResponse' : 'response';
-        request.once(responseEventName, (response) => {
-            void this._onResponse(response);
-        });
-        request.once('error', (error) => {
-            this._aborted = true;
-            // Force clean-up, because some packages (e.g. nock) don't do this.
-            request.destroy();
-            error = error instanceof timed_out_TimeoutError ? new TimeoutError(error, this.timings, this) : new RequestError(error.message, error, this);
-            this._beforeError(error);
-        });
-        this._unproxyEvents = proxyEvents(request, this, proxiedRequestEvents);
-        this._request = request;
-        this.emit('uploadProgress', this.uploadProgress);
-        this._sendBody();
-        this.emit('request', request);
-    }
-    async _asyncWrite(chunk) {
-        return new Promise((resolve, reject) => {
-            super.write(chunk, error => {
-                if (error) {
-                    reject(error);
-                    return;
-                }
-                resolve();
-            });
-        });
-    }
-    _sendBody() {
-        // Send body
-        const { body } = this.options;
-        const currentRequest = this.redirectUrls.length === 0 ? this : this._request ?? this;
-        if (dist.nodeStream(body)) {
-            body.pipe(currentRequest);
-        }
-        else if (dist.generator(body) || dist.asyncGenerator(body)) {
-            (async () => {
-                try {
-                    for await (const chunk of body) {
-                        await this._asyncWrite(chunk);
-                    }
-                    super.end();
-                }
-                catch (error) {
-                    this._beforeError(error);
-                }
-            })();
-        }
-        else if (!dist.undefined(body)) {
-            this._writeRequest(body, undefined, () => { });
-            currentRequest.end();
-        }
-        else if (this._cannotHaveBody || this._noPipe) {
-            currentRequest.end();
-        }
-    }
-    _prepareCache(cache) {
-        if (!cacheableStore.has(cache)) {
-            const cacheableRequest = new cacheable_request_dist(((requestOptions, handler) => {
-                const result = requestOptions._request(requestOptions, handler);
-                // TODO: remove this when `cacheable-request` supports async request functions.
-                if (dist.promise(result)) {
-                    // We only need to implement the error handler in order to support HTTP2 caching.
-                    // The result will be a promise anyway.
-                    // @ts-expect-error ignore
-                    // eslint-disable-next-line @typescript-eslint/promise-function-async
-                    result.once = (event, handler) => {
-                        if (event === 'error') {
-                            (async () => {
-                                try {
-                                    await result;
-                                }
-                                catch (error) {
-                                    handler(error);
-                                }
-                            })();
-                        }
-                        else if (event === 'abort') {
-                            // The empty catch is needed here in case when
-                            // it rejects before it's `await`ed in `_makeRequest`.
-                            (async () => {
-                                try {
-                                    const request = (await result);
-                                    request.once('abort', handler);
-                                }
-                                catch { }
-                            })();
-                        }
-                        else {
-                            /* istanbul ignore next: safety check */
-                            throw new Error(`Unknown HTTP2 promise event: ${event}`);
-                        }
-                        return result;
-                    };
-                }
-                return result;
-            }), cache);
-            cacheableStore.set(cache, cacheableRequest.request());
-        }
-    }
-    async _createCacheableRequest(url, options) {
-        return new Promise((resolve, reject) => {
-            // TODO: Remove `utils/url-to-options.ts` when `cacheable-request` is fixed
-            Object.assign(options, urlToOptions(url));
-            let request;
-            // TODO: Fix `cacheable-response`. This is ugly.
-            const cacheRequest = cacheableStore.get(options.cache)(options, async (response) => {
-                response._readableState.autoDestroy = false;
-                if (request) {
-                    const fix = () => {
-                        if (response.req) {
-                            response.complete = response.req.res.complete;
-                        }
-                    };
-                    response.prependOnceListener('end', fix);
-                    fix();
-                    (await request).emit('cacheableResponse', response);
-                }
-                resolve(response);
-            });
-            cacheRequest.once('error', reject);
-            cacheRequest.once('request', async (requestOrPromise) => {
-                request = requestOrPromise;
-                resolve(request);
-            });
-        });
-    }
-    async _makeRequest() {
-        const { options } = this;
-        const { headers, username, password } = options;
-        const cookieJar = options.cookieJar;
-        for (const key in headers) {
-            if (dist.undefined(headers[key])) {
-                // eslint-disable-next-line @typescript-eslint/no-dynamic-delete
-                delete headers[key];
-            }
-            else if (dist.null_(headers[key])) {
-                throw new TypeError(`Use \`undefined\` instead of \`null\` to delete the \`${key}\` header`);
-            }
-        }
-        if (options.decompress && dist.undefined(headers['accept-encoding'])) {
-            headers['accept-encoding'] = supportsBrotli ? 'gzip, deflate, br' : 'gzip, deflate';
-        }
-        if (username || password) {
-            const credentials = external_node_buffer_namespaceObject.Buffer.from(`${username}:${password}`).toString('base64');
-            headers.authorization = `Basic ${credentials}`;
-        }
-        // Set cookies
-        if (cookieJar) {
-            const cookieString = await cookieJar.getCookieString(options.url.toString());
-            if (dist.nonEmptyString(cookieString)) {
-                headers.cookie = cookieString;
-            }
-        }
-        // Reset `prefixUrl`
-        options.prefixUrl = '';
-        let request;
-        for (const hook of options.hooks.beforeRequest) {
-            // eslint-disable-next-line no-await-in-loop
-            const result = await hook(options);
-            if (!dist.undefined(result)) {
-                // @ts-expect-error Skip the type mismatch to support abstract responses
-                request = () => result;
-                break;
-            }
-        }
-        if (!request) {
-            request = options.getRequestFunction();
-        }
-        const url = options.url;
-        this._requestOptions = options.createNativeRequestOptions();
-        if (options.cache) {
-            this._requestOptions._request = request;
-            this._requestOptions.cache = options.cache;
-            this._requestOptions.body = options.body;
-            this._prepareCache(options.cache);
-        }
-        // Cache support
-        const fn = options.cache ? this._createCacheableRequest : request;
-        try {
-            // We can't do `await fn(...)`,
-            // because stream `error` event can be emitted before `Promise.resolve()`.
-            let requestOrResponse = fn(url, this._requestOptions);
-            if (dist.promise(requestOrResponse)) {
-                requestOrResponse = await requestOrResponse;
-            }
-            // Fallback
-            if (dist.undefined(requestOrResponse)) {
-                requestOrResponse = options.getFallbackRequestFunction()(url, this._requestOptions);
-                if (dist.promise(requestOrResponse)) {
-                    requestOrResponse = await requestOrResponse;
-                }
-            }
-            if (is_client_request(requestOrResponse)) {
-                this._onRequest(requestOrResponse);
-            }
-            else if (this.writable) {
-                this.once('finish', () => {
-                    void this._onResponse(requestOrResponse);
-                });
-                this._sendBody();
-            }
-            else {
-                void this._onResponse(requestOrResponse);
-            }
-        }
-        catch (error) {
-            if (error instanceof types_CacheError) {
-                throw new CacheError(error, this);
-            }
-            throw error;
-        }
-    }
-    async _error(error) {
-        try {
-            if (error instanceof HTTPError && !this.options.throwHttpErrors) {
-                // This branch can be reached only when using the Promise API
-                // Skip calling the hooks on purpose.
-                // See https://github.com/sindresorhus/got/issues/2103
-            }
-            else {
-                for (const hook of this.options.hooks.beforeError) {
-                    // eslint-disable-next-line no-await-in-loop
-                    error = await hook(error);
-                }
-            }
-        }
-        catch (error_) {
-            error = new RequestError(error_.message, error_, this);
-        }
-        this.destroy(error);
-    }
-    _writeRequest(chunk, encoding, callback) {
-        if (!this._request || this._request.destroyed) {
-            // Probably the `ClientRequest` instance will throw
-            return;
-        }
-        this._request.write(chunk, encoding, (error) => {
-            // The `!destroyed` check is required to prevent `uploadProgress` being emitted after the stream was destroyed
-            if (!error && !this._request.destroyed) {
-                this._uploadedSize += external_node_buffer_namespaceObject.Buffer.byteLength(chunk, encoding);
-                const progress = this.uploadProgress;
-                if (progress.percent < 1) {
-                    this.emit('uploadProgress', progress);
-                }
-            }
-            callback(error);
-        });
-    }
-    /**
-    The remote IP address.
-    */
-    get ip() {
-        return this.socket?.remoteAddress;
-    }
-    /**
-    Indicates whether the request has been aborted or not.
-    */
-    get isAborted() {
-        return this._aborted;
-    }
-    get socket() {
-        return this._request?.socket ?? undefined;
-    }
-    /**
-    Progress event for downloading (receiving a response).
-    */
-    get downloadProgress() {
-        let percent;
-        if (this._responseSize) {
-            percent = this._downloadedSize / this._responseSize;
-        }
-        else if (this._responseSize === this._downloadedSize) {
-            percent = 1;
-        }
-        else {
-            percent = 0;
-        }
-        return {
-            percent,
-            transferred: this._downloadedSize,
-            total: this._responseSize,
-        };
-    }
-    /**
-    Progress event for uploading (sending a request).
-    */
-    get uploadProgress() {
-        let percent;
-        if (this._bodySize) {
-            percent = this._uploadedSize / this._bodySize;
-        }
-        else if (this._bodySize === this._uploadedSize) {
-            percent = 1;
-        }
-        else {
-            percent = 0;
-        }
-        return {
-            percent,
-            transferred: this._uploadedSize,
-            total: this._bodySize,
-        };
-    }
-    /**
-    The object contains the following properties:
-
-    - `start` - Time when the request started.
-    - `socket` - Time when a socket was assigned to the request.
-    - `lookup` - Time when the DNS lookup finished.
-    - `connect` - Time when the socket successfully connected.
-    - `secureConnect` - Time when the socket securely connected.
-    - `upload` - Time when the request finished uploading.
-    - `response` - Time when the request fired `response` event.
-    - `end` - Time when the response fired `end` event.
-    - `error` - Time when the request fired `error` event.
-    - `abort` - Time when the request fired `abort` event.
-    - `phases`
-        - `wait` - `timings.socket - timings.start`
-        - `dns` - `timings.lookup - timings.socket`
-        - `tcp` - `timings.connect - timings.lookup`
-        - `tls` - `timings.secureConnect - timings.connect`
-        - `request` - `timings.upload - (timings.secureConnect || timings.connect)`
-        - `firstByte` - `timings.response - timings.upload`
-        - `download` - `timings.end - timings.response`
-        - `total` - `(timings.end || timings.error || timings.abort) - timings.start`
-
-    If something has not been measured yet, it will be `undefined`.
-
-    __Note__: The time is a `number` representing the milliseconds elapsed since the UNIX epoch.
-    */
-    get timings() {
-        return this._request?.timings;
-    }
-    /**
-    Whether the response was retrieved from the cache.
-    */
-    get isFromCache() {
-        return this._isFromCache;
-    }
-    get reusedSocket() {
-        return this._request?.reusedSocket;
-    }
-}
-
-;// CONCATENATED MODULE: ./node_modules/got/dist/source/as-promise/types.js
-
-/**
-An error to be thrown when the request is aborted with `.cancel()`.
-*/
-class types_CancelError extends RequestError {
-    constructor(request) {
-        super('Promise was canceled', {}, request);
-        this.name = 'CancelError';
-        this.code = 'ERR_CANCELED';
-    }
-    /**
-    Whether the promise is canceled.
-    */
-    get isCanceled() {
-        return true;
-    }
-}
-
-;// CONCATENATED MODULE: ./node_modules/got/dist/source/as-promise/index.js
-
-
-
-
-
-
-
-
-const as_promise_proxiedRequestEvents = [
-    'request',
-    'response',
-    'redirect',
-    'uploadProgress',
-    'downloadProgress',
-];
-function asPromise(firstRequest) {
-    let globalRequest;
-    let globalResponse;
-    let normalizedOptions;
-    const emitter = new external_node_events_namespaceObject.EventEmitter();
-    const promise = new PCancelable((resolve, reject, onCancel) => {
-        onCancel(() => {
-            globalRequest.destroy();
-        });
-        onCancel.shouldReject = false;
-        onCancel(() => {
-            reject(new types_CancelError(globalRequest));
-        });
-        const makeRequest = (retryCount) => {
-            // Errors when a new request is made after the promise settles.
-            // Used to detect a race condition.
-            // See https://github.com/sindresorhus/got/issues/1489
-            onCancel(() => { });
-            const request = firstRequest ?? new Request(undefined, undefined, normalizedOptions);
-            request.retryCount = retryCount;
-            request._noPipe = true;
-            globalRequest = request;
-            request.once('response', async (response) => {
-                // Parse body
-                const contentEncoding = (response.headers['content-encoding'] ?? '').toLowerCase();
-                const isCompressed = contentEncoding === 'gzip' || contentEncoding === 'deflate' || contentEncoding === 'br';
-                const { options } = request;
-                if (isCompressed && !options.decompress) {
-                    response.body = response.rawBody;
-                }
-                else {
-                    try {
-                        response.body = parseBody(response, options.responseType, options.parseJson, options.encoding);
-                    }
-                    catch (error) {
-                        // Fall back to `utf8`
-                        response.body = response.rawBody.toString();
-                        if (isResponseOk(response)) {
-                            request._beforeError(error);
-                            return;
-                        }
-                    }
-                }
-                try {
-                    const hooks = options.hooks.afterResponse;
-                    for (const [index, hook] of hooks.entries()) {
-                        // @ts-expect-error TS doesn't notice that CancelableRequest is a Promise
-                        // eslint-disable-next-line no-await-in-loop
-                        response = await hook(response, async (updatedOptions) => {
-                            options.merge(updatedOptions);
-                            options.prefixUrl = '';
-                            if (updatedOptions.url) {
-                                options.url = updatedOptions.url;
-                            }
-                            // Remove any further hooks for that request, because we'll call them anyway.
-                            // The loop continues. We don't want duplicates (asPromise recursion).
-                            options.hooks.afterResponse = options.hooks.afterResponse.slice(0, index);
-                            throw new RetryError(request);
-                        });
-                        if (!(dist.object(response) && dist.number(response.statusCode) && !dist.nullOrUndefined(response.body))) {
-                            throw new TypeError('The `afterResponse` hook returned an invalid value');
-                        }
-                    }
-                }
-                catch (error) {
-                    request._beforeError(error);
-                    return;
-                }
-                globalResponse = response;
-                if (!isResponseOk(response)) {
-                    request._beforeError(new HTTPError(response));
-                    return;
-                }
-                request.destroy();
-                resolve(request.options.resolveBodyOnly ? response.body : response);
-            });
-            const onError = (error) => {
-                if (promise.isCanceled) {
-                    return;
-                }
-                const { options } = request;
-                if (error instanceof HTTPError && !options.throwHttpErrors) {
-                    const { response } = error;
-                    request.destroy();
-                    resolve(request.options.resolveBodyOnly ? response.body : response);
-                    return;
-                }
-                reject(error);
-            };
-            request.once('error', onError);
-            const previousBody = request.options?.body;
-            request.once('retry', (newRetryCount, error) => {
-                firstRequest = undefined;
-                const newBody = request.options.body;
-                if (previousBody === newBody && dist.nodeStream(newBody)) {
-                    error.message = 'Cannot retry with consumed body stream';
-                    onError(error);
-                    return;
-                }
-                // This is needed! We need to reuse `request.options` because they can get modified!
-                // For example, by calling `promise.json()`.
-                normalizedOptions = request.options;
-                makeRequest(newRetryCount);
-            });
-            proxyEvents(request, emitter, as_promise_proxiedRequestEvents);
-            if (dist.undefined(firstRequest)) {
-                void request.flush();
-            }
-        };
-        makeRequest(0);
-    });
-    promise.on = (event, fn) => {
-        emitter.on(event, fn);
-        return promise;
-    };
-    promise.off = (event, fn) => {
-        emitter.off(event, fn);
-        return promise;
-    };
-    const shortcut = (responseType) => {
-        const newPromise = (async () => {
-            // Wait until downloading has ended
-            await promise;
-            const { options } = globalResponse.request;
-            return parseBody(globalResponse, responseType, options.parseJson, options.encoding);
-        })();
-        // eslint-disable-next-line @typescript-eslint/no-floating-promises
-        Object.defineProperties(newPromise, Object.getOwnPropertyDescriptors(promise));
-        return newPromise;
-    };
-    promise.json = () => {
-        if (globalRequest.options) {
-            const { headers } = globalRequest.options;
-            if (!globalRequest.writableFinished && !('accept' in headers)) {
-                headers.accept = 'application/json';
-            }
-        }
-        return shortcut('json');
-    };
-    promise.buffer = () => shortcut('buffer');
-    promise.text = () => shortcut('text');
-    return promise;
-}
-
-;// CONCATENATED MODULE: ./node_modules/got/dist/source/create.js
-
-
-
-
-// The `delay` package weighs 10KB (!)
-const delay = async (ms) => new Promise(resolve => {
-    setTimeout(resolve, ms);
-});
-const isGotInstance = (value) => dist.function_(value);
-const aliases = [
-    'get',
-    'post',
-    'put',
-    'patch',
-    'head',
-    'delete',
-];
-const create = (defaults) => {
-    defaults = {
-        options: new Options(undefined, undefined, defaults.options),
-        handlers: [...defaults.handlers],
-        mutableDefaults: defaults.mutableDefaults,
-    };
-    Object.defineProperty(defaults, 'mutableDefaults', {
-        enumerable: true,
-        configurable: false,
-        writable: false,
-    });
-    // Got interface
-    const got = ((url, options, defaultOptions = defaults.options) => {
-        const request = new Request(url, options, defaultOptions);
-        let promise;
-        const lastHandler = (normalized) => {
-            // Note: `options` is `undefined` when `new Options(...)` fails
-            request.options = normalized;
-            request._noPipe = !normalized.isStream;
-            void request.flush();
-            if (normalized.isStream) {
-                return request;
-            }
-            if (!promise) {
-                promise = asPromise(request);
-            }
-            return promise;
-        };
-        let iteration = 0;
-        const iterateHandlers = (newOptions) => {
-            const handler = defaults.handlers[iteration++] ?? lastHandler;
-            const result = handler(newOptions, iterateHandlers);
-            if (dist.promise(result) && !request.options.isStream) {
-                if (!promise) {
-                    promise = asPromise(request);
-                }
-                if (result !== promise) {
-                    const descriptors = Object.getOwnPropertyDescriptors(promise);
-                    for (const key in descriptors) {
-                        if (key in result) {
-                            // eslint-disable-next-line @typescript-eslint/no-dynamic-delete
-                            delete descriptors[key];
-                        }
-                    }
-                    // eslint-disable-next-line @typescript-eslint/no-floating-promises
-                    Object.defineProperties(result, descriptors);
-                    result.cancel = promise.cancel;
-                }
-            }
-            return result;
-        };
-        return iterateHandlers(request.options);
-    });
-    got.extend = (...instancesOrOptions) => {
-        const options = new Options(undefined, undefined, defaults.options);
-        const handlers = [...defaults.handlers];
-        let mutableDefaults;
-        for (const value of instancesOrOptions) {
-            if (isGotInstance(value)) {
-                options.merge(value.defaults.options);
-                handlers.push(...value.defaults.handlers);
-                mutableDefaults = value.defaults.mutableDefaults;
-            }
-            else {
-                options.merge(value);
-                if (value.handlers) {
-                    handlers.push(...value.handlers);
-                }
-                mutableDefaults = value.mutableDefaults;
-            }
-        }
-        return create({
-            options,
-            handlers,
-            mutableDefaults: Boolean(mutableDefaults),
-        });
-    };
-    // Pagination
-    const paginateEach = (async function* (url, options) {
-        let normalizedOptions = new Options(url, options, defaults.options);
-        normalizedOptions.resolveBodyOnly = false;
-        const { pagination } = normalizedOptions;
-        assert.function_(pagination.transform);
-        assert.function_(pagination.shouldContinue);
-        assert.function_(pagination.filter);
-        assert.function_(pagination.paginate);
-        assert.number(pagination.countLimit);
-        assert.number(pagination.requestLimit);
-        assert.number(pagination.backoff);
-        const allItems = [];
-        let { countLimit } = pagination;
-        let numberOfRequests = 0;
-        while (numberOfRequests < pagination.requestLimit) {
-            if (numberOfRequests !== 0) {
-                // eslint-disable-next-line no-await-in-loop
-                await delay(pagination.backoff);
-            }
-            // eslint-disable-next-line no-await-in-loop
-            const response = (await got(undefined, undefined, normalizedOptions));
-            // eslint-disable-next-line no-await-in-loop
-            const parsed = await pagination.transform(response);
-            const currentItems = [];
-            assert.array(parsed);
-            for (const item of parsed) {
-                if (pagination.filter({ item, currentItems, allItems })) {
-                    if (!pagination.shouldContinue({ item, currentItems, allItems })) {
-                        return;
-                    }
-                    yield item;
-                    if (pagination.stackAllItems) {
-                        allItems.push(item);
-                    }
-                    currentItems.push(item);
-                    if (--countLimit <= 0) {
-                        return;
-                    }
-                }
-            }
-            const optionsToMerge = pagination.paginate({
-                response,
-                currentItems,
-                allItems,
-            });
-            if (optionsToMerge === false) {
-                return;
-            }
-            if (optionsToMerge === response.request.options) {
-                normalizedOptions = response.request.options;
-            }
-            else {
-                normalizedOptions.merge(optionsToMerge);
-                assert.any([dist.urlInstance, dist.undefined], optionsToMerge.url);
-                if (optionsToMerge.url !== undefined) {
-                    normalizedOptions.prefixUrl = '';
-                    normalizedOptions.url = optionsToMerge.url;
-                }
-            }
-            numberOfRequests++;
-        }
-    });
-    got.paginate = paginateEach;
-    got.paginate.all = (async (url, options) => {
-        const results = [];
-        for await (const item of paginateEach(url, options)) {
-            results.push(item);
-        }
-        return results;
-    });
-    // For those who like very descriptive names
-    got.paginate.each = paginateEach;
-    // Stream API
-    got.stream = ((url, options) => got(url, { ...options, isStream: true }));
-    // Shortcuts
-    for (const method of aliases) {
-        got[method] = ((url, options) => got(url, { ...options, method }));
-        got.stream[method] = ((url, options) => got(url, { ...options, method, isStream: true }));
-    }
-    if (!defaults.mutableDefaults) {
-        Object.freeze(defaults.handlers);
-        defaults.options.freeze();
-    }
-    Object.defineProperty(got, 'defaults', {
-        value: defaults,
-        writable: false,
-        configurable: false,
-        enumerable: true,
-    });
-    return got;
-};
-/* harmony default export */ const source_create = (create);
-
-;// CONCATENATED MODULE: ./node_modules/got/dist/source/index.js
-
-
-const defaults = {
-    options: new Options(),
-    handlers: [],
-    mutableDefaults: false,
-};
-const got = source_create(defaults);
-/* harmony default export */ const got_dist_source = ((/* unused pure expression or super */ null && (got)));
-
-
-
-
-
-
-
-
-
-
-
 
 // EXTERNAL MODULE: external "fs"
 var external_fs_ = __nccwpck_require__(7147);
@@ -12532,7 +16319,7 @@ class ChromeWebStore {
     clientId;
     refreshToken;
     clientSecret;
-    rootURL = 'https://www.googleapis.com';
+    rootURL = "https://www.googleapis.com";
     token;
     /**
      * Creates a new instance of the webstore
@@ -12551,45 +16338,64 @@ class ChromeWebStore {
     }
     /**
      * Uploads to an existing extension
-     * @param readStream FS readStream
+     * @param file File to upload
      */
-    async uploadExisting(readStream) {
+    async uploadExisting(file) {
         const hdr = await this.setHeaders();
-        return got.put(`${this.rootURL}/upload/chromewebstore/v1.1/items/${this.extensionId}`, {
+        let readStream;
+        if (typeof file === "string") {
+            readStream = external_fs_.createReadStream(file);
+        }
+        else {
+            readStream = file;
+        }
+        const resp = await fetch(`${this.rootURL}/upload/chromewebstore/v1.1/items/${this.extensionId}`, {
+            method: "PUT",
             headers: hdr,
-            body: readStream,
-        })
-            .json();
-    }
-    /**
-     * Uploads to an existing extension
-     * @param file
-     */
-    async uploadExistingFile(file) {
-        const zipfile = external_fs_.createReadStream(file);
-        return this.uploadExisting(zipfile);
+            body: readStream
+        });
+        const resp_body = await resp.json();
+        if (!resp.ok) {
+            throw new Error(`Invalid response: ${resp.statusText}, ` +
+                `${JSON.stringify(resp_body)}`);
+        }
+        return resp_body;
     }
     /**
      * Publish the extension
      * @param target Target group
      */
-    async publish(target = 'default') {
-        return got.post(`${this.rootURL}/chromewebstore/v1.1/items/` +
+    async publish(target = "default") {
+        const response = await fetch(`${this.rootURL}/chromewebstore/v1.1/items/` +
             `${this.extensionId}/publish?publishTarget=${target}`, {
-            headers: await this.setHeaders(),
-        })
-            .json();
+            method: "POST",
+            headers: await this.setHeaders()
+        });
+        const resp_body = await response.json();
+        if (!response.ok) {
+            throw new Error(`Invalid response: ${response.statusText}, ` +
+                `${JSON.stringify(resp_body)}`);
+        }
+        return resp_body;
     }
     /**
      * Gets an extension's info
      * @param projection
      */
-    async get(projection = 'DRAFT') {
-        return got.get(`${this.rootURL}/chromewebstore/v1.1/items/` +
+    async get(projection = "DRAFT") {
+        const hdr = await this.setHeaders();
+        const res = await fetch(`${this.rootURL}/chromewebstore/v1.1/items/` +
             `${this.extensionId}?projection=${projection}`, {
-            headers: await this.setHeaders(),
-        })
-            .json();
+            method: "GET",
+            headers: hdr
+        });
+        return res.json();
+    }
+    /**
+     * Clears token
+     */
+    clearToken() {
+        this.token = undefined;
     }
     /**
      * Check if a new token is needed
@@ -12599,17 +16405,18 @@ class ChromeWebStore {
         if (this.token) {
             return this.token;
         }
-        const refreshTokenURI = 'https://www.googleapis.com/oauth2/v4/token';
+        const refreshTokenURI = "https://www.googleapis.com/oauth2/v4/token";
         let json = {
             client_id: this.clientId,
             refresh_token: this.refreshToken,
-            grant_type: 'refresh_token',
+            grant_type: "refresh_token"
         };
         if (this.clientSecret) {
             json.client_secret = this.clientSecret;
         }
-        const response = await got.post(refreshTokenURI, { json }).json();
-        this.token = response.access_token;
+        const response = await fetch(refreshTokenURI, { method: "POST", body: JSON.stringify(json) });
+        const resp_body = await response.json();
+        this.token = resp_body.access_token;
         return this.token;
     }
     /**
@@ -12620,7 +16427,7 @@ class ChromeWebStore {
         await this.checkToken().then();
         return {
             Authorization: `Bearer ${this.token}`,
-            'x-goog-api-version': '2',
+            "x-goog-api-version": "2"
         };
     }
 }
@@ -12647,15 +16454,167 @@ function getWebStoreInputs() {
     if (ff_id) {
         inp.firefox = {
             extensionId: ff_id,
-            apiKey: core.getInput(""),
-            apiSecret: core.getInput(""),
-            file: core.getInput("")
+            apiKey: core.getInput("api_key"),
+            apiSecret: core.getInput("api_secret"),
+            file: core.getInput("file"),
+            srcFile: core.getInput("src_file")
         };
     }
     return inp;
 }
 
+// EXTERNAL MODULE: ./node_modules/jsonwebtoken/index.js
+var jsonwebtoken = __nccwpck_require__(7486);
+// EXTERNAL MODULE: ./node_modules/form-data/lib/form_data.js
+var form_data = __nccwpck_require__(4334);
+;// CONCATENATED MODULE: ./lib/mozilla_webstore.js
+
+
+
+
+class MozillaWebStore {
+    extensionId;
+    apiKey;
+    apiSecret;
+    rootURL = "https://addons.mozilla.org";
+    /**
+     * Creates a new instance of the webstore
+     * @param extensionId Extension ID
+     * @param apiKey API Key
+     * @param apiSecret API Secret
+     */
+    constructor(extensionId, apiKey, apiSecret) {
+        this.extensionId = extensionId;
+        this.apiKey = apiKey;
+        this.apiSecret = apiSecret;
+    }
+    /**
+     *
+     * @param file Extension package file
+     * @param channel "listed" or "unlisted"
+     * @param wait Wait for file to finish processing
+     */
+    async uploadPackage(file, channel = "listed", wait = true) {
+        const formData = new form_data();
+        if (typeof file === "string") {
+            formData.append("upload", external_fs_.createReadStream(file));
+        }
+        else {
+            formData.append("upload", file);
+        }
+        formData.append("channel", channel);
+        const hdr = await this.setHeaders();
+        const res = await fetch(`${this.rootURL}/api/v5/addons/upload/`, { method: "POST", headers: hdr, body: formData });
+        const resp_body = await res.json();
+        if (!res.ok) {
+            throw new Error(`Invalid response: ${res.statusText}, ` +
+                `${JSON.stringify(resp_body)}`);
+        }
+        if (wait) {
+            return this.waitPackage(resp_body);
+        }
+        return resp_body;
+    }
+    /**
+     * Waits for package to finish validation or error
+     * @param resp_body Response body
+     */
+    async waitPackage(resp_body) {
+        const uuid = resp_body.uuid;
+        let finished = false;
+        const max_wait = 120;
+        const wait_interval = 5;
+        let res = resp_body;
+        for (let i = 0; i < max_wait; i + wait_interval) {
+            if (res.processed || res.submitted) {
+                finished = true;
+                break;
+            }
+            await new Promise(resolve => setTimeout(resolve, wait_interval * 1000));
+            res = await this.checkPackage(uuid);
+        }
+        if (!finished) {
+            throw Error("Maximum timeout reached while waiting for validation...");
+        }
+        return res;
+    }
+    /**
+     * Check package upload status
+     * @param uuid UUID of the package
+     * @private
+     */
+    async checkPackage(uuid) {
+        const hdr = await this.setHeaders();
+        const response = await fetch(`${this.rootURL}/api/v5/addons/upload/${uuid}/`, {
+            method: "GET",
+            headers: hdr
+        });
+        const resp_body = await response.json();
+        if (!response.ok) {
+            throw new Error(`Invalid response: ${response.statusText}, ` +
+                `${JSON.stringify(resp_body)}`);
+        }
+        return resp_body;
+    }
+    /**
+     * Creates a new version
+     * @param uuid UUID of upload
+     * @param srcfile (Optional) srcfile
+     */
+    async createNewVersion(uuid, srcfile) {
+        const formData = new form_data();
+        if (srcfile && typeof (srcfile) === "string") {
+            formData.append("source", external_fs_.createReadStream(srcfile));
+        }
+        else if (srcfile) {
+            formData.append("source", srcfile);
+        }
+        else {
+            formData.append("source", "");
+        }
+        const hdr = await this.setHeaders();
+        const res = await fetch(`${this.rootURL}/api/v5/addons/addon/${this.extensionId}/versions/`, {
+            method: "POST",
+            headers: hdr,
+            body: formData
+        });
+        const resp_body = await res.json();
+        if (!res.ok) {
+            throw new Error(`Invalid response: ${res.statusText}, ` +
+                `${JSON.stringify(resp_body)}`);
+        }
+        return resp_body;
+    }
+    /**
+     * Gets a new token
+     * @private
+     */
+    async getToken() {
+        const issuedAt = Math.floor(Date.now() / 1000);
+        const payload = {
+            iss: this.apiKey,
+            jti: Math.random().toString(),
+            iat: issuedAt,
+            exp: issuedAt + 60
+        };
+        return jsonwebtoken.sign(payload, this.apiSecret, {
+            algorithm: "HS256" // HMAC-SHA256 signing algorithm
+        });
+    }
+    /**
+     * Sets header for any API calls
+     * @private
+     */
+    async setHeaders() {
+        const token = await this.getToken();
+        return {
+            Authorization: `JWT ${token}`
+        };
+    }
+}
+
 ;// CONCATENATED MODULE: ./lib/main.js
+
 
 
 
@@ -12665,9 +16624,9 @@ function getWebStoreInputs() {
  */
 async function runChrome(inp) {
     try {
-        core.info(`Uploading extension ${inp.extensionId}...`);
+        core.info(`Uploading Chrome extension ${inp.extensionId}...`);
         const store = new ChromeWebStore(inp.extensionId, inp.clientId, inp.refreshToken, inp.clientSecret);
-        const chrome_res = await store.uploadExistingFile(inp.file);
+        const chrome_res = await store.uploadExisting(inp.file);
         core.info(JSON.stringify(chrome_res));
         if (inp.publish) {
             const publish_res = await store.publish();
@@ -12684,6 +16643,18 @@ async function runChrome(inp) {
  * @param inp
  */
 async function runFirefox(inp) {
+    try {
+        core.info(`Uploading Firefox extension ${inp.extensionId}...`);
+        const store = new MozillaWebStore(inp.extensionId, inp.apiKey, inp.apiSecret);
+        const ff_res = await store.uploadPackage(inp.file);
+        core.info(JSON.stringify(ff_res));
+        const new_res = await store.createNewVersion(ff_res.uuid, inp.srcFile);
+        core.info(JSON.stringify(new_res));
+    }
+    catch (error) {
+        if (error instanceof Error)
+            core.setFailed(error.message);
+    }
 }
 /**
  * Run all
