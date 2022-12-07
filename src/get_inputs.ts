@@ -14,6 +14,7 @@ export interface FirefoxInputs {
     apiKey: string
     apiSecret: string
     file: string
+    srcFile: string
 }
 
 interface WebStoreInputs {
@@ -41,9 +42,10 @@ export function getWebStoreInputs(): WebStoreInputs {
     if (ff_id) {
         inp.firefox = {
             extensionId: ff_id,
-            apiKey: core.getInput(""),
-            apiSecret: core.getInput(""),
-            file: core.getInput("")
+            apiKey: core.getInput("api_key"),
+            apiSecret: core.getInput("api_secret"),
+            file: core.getInput("file"),
+            srcFile: core.getInput("src_file")
         }
     }
     return inp

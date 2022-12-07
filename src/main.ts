@@ -1,6 +1,7 @@
 import * as core from '@actions/core'
 import {ChromeWebStore} from "./chrome_webstore.js";
 import {getWebStoreInputs, ChromeInputs, FirefoxInputs} from "./get_inputs.js";
+import {MozillaWebStore} from "./mozilla_webstore.js";
 
 /**
  * Runs the Chrome store logic
@@ -16,7 +17,7 @@ async function runChrome(inp: ChromeInputs): Promise<void> {
             inp.refreshToken,
             inp.clientSecret,
         );
-        const chrome_res = await store.uploadExistingFile(inp.file)
+        const chrome_res = await store.uploadExisting(inp.file)
         core.info(JSON.stringify(chrome_res))
         if (inp.publish) {
             const publish_res = await store.publish()
@@ -34,6 +35,16 @@ async function runChrome(inp: ChromeInputs): Promise<void> {
 async function runFirefox(inp: FirefoxInputs): Promise<void> {
     try {
         core.info(`Uploading Firefox extension ${inp.extensionId}...`)
+
+        const store = new MozillaWebStore(
+            inp.extensionId,
+            inp.apiKey,
+            inp.apiSecret
+        )
+        const ff_res = await store.uploadPackage(inp.file)
+        core.info(JSON.stringify(ff_res))
+        const new_res = await store.createNewVersion(ff_res.uuid, inp.srcFile)
+        core.info(JSON.stringify(new_res))
     } catch (error) {
         if (error instanceof Error) core.setFailed(error.message)
     }
