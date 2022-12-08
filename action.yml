@@ -1,26 +1,22 @@
-name: 'WebExtPublish: Chrome'
-description: 'Web Extension Publish workflow for Chrome.'
+name: 'WebExtPublish: Firefox'
+description: 'Web Extension Publish workflow for Firefox.'
 author: 'Mao Yu'
 inputs:
-  chrome_extension_id:
+  firefox_extension_id:
     required: true
     description: 'Extension ID.'
-  client_id:
+  api_key:
     required: true
-    description: 'Client ID'
-  refresh_token:
+    description: "API key from Mozilla"
+  api_secret:
     required: true
-    description: 'Refresh Token'
-  client_secret:
-    required: true
-    description: 'Client Secret'
+    description: "API secret from Mozilla"
   file:
     required: true
-    description: 'Zip file for chrome extension'
-  publish:
+    description: 'Zip file for firefox extension'
+  src_file:
     required: false
-    default: "true"
-    description: 'Publish extension after upload'
+    description: 'Zip file for source upload'
 runs:
   using: 'node16'
   main: '../dist/index.js'
