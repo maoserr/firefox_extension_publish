@@ -13,6 +13,8 @@ To generate zip you can use the GitHub bash action definition below:
         working-directory: dist/firefox_prod
 ```
 
+See full example: https://github.com/maoserr/epublifier/blob/develop/.github/workflows/build.yml
+
 ## Firefox setup
 
 Required Parameters:
