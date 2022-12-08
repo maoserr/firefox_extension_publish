@@ -1,7 +1,7 @@
 import jwt from "jsonwebtoken";
 import fs from "fs";
 import fetch from "node-fetch";
-import FormData from "form-data"
+import FormData from "form-data";
 
 export class MozillaWebStore {
     readonly extensionId: string;
@@ -33,27 +33,27 @@ export class MozillaWebStore {
     async uploadPackage(file: fs.ReadStream | string,
                         channel: string = "listed",
                         wait: boolean = true): Promise<any> {
-        const formData = new FormData()
+        const formData = new FormData();
         if (typeof file === "string") {
-            formData.append("upload", fs.createReadStream(file))
+            formData.append("upload", fs.createReadStream(file));
 
         } else {
-            formData.append("upload", file)
+            formData.append("upload", file);
         }
-        formData.append("channel", channel)
+        formData.append("channel", channel);
         const hdr = await this.setHeaders();
 
         const res = await fetch(
             `${this.rootURL}/api/v5/addons/upload/`,
             {method: "POST", headers: hdr, body: formData}
         );
-        const resp_body = await res.json()
+        const resp_body = await res.json();
         if (!res.ok) {
             throw new Error(`Invalid response: ${res.statusText}, ` +
-                `${JSON.stringify(resp_body)}`)
+                `${JSON.stringify(resp_body)}`);
         }
         if (wait) {
-            return this.waitPackage(resp_body)
+            return this.waitPackage(resp_body);
         }
         return resp_body;
     }
@@ -63,23 +63,23 @@ export class MozillaWebStore {
      * @param resp_body Response body
      */
     async waitPackage(resp_body: any): Promise<any> {
-        const uuid = resp_body.uuid
-        let finished = false
-        const max_wait = 120
-        const wait_interval = 5
-        let res = resp_body
+        const uuid = resp_body.uuid;
+        let finished = false;
+        const max_wait = 120;
+        const wait_interval = 5;
+        let res = resp_body;
         for (let i = 0; i < max_wait; i + wait_interval) {
             if (res.processed || res.submitted) {
-                finished = true
-                break
+                finished = true;
+                break;
             }
-            await new Promise(resolve => setTimeout(resolve, wait_interval*1000));
-            res = await this.checkPackage(uuid)
+            await new Promise(resolve => setTimeout(resolve, wait_interval * 1000));
+            res = await this.checkPackage(uuid);
         }
         if (!finished) {
-            throw Error("Maximum timeout reached while waiting for validation...")
+            throw Error("Maximum timeout reached while waiting for validation...");
         }
-        return res
+        return res;
     }
 
     /**
@@ -92,16 +92,16 @@ export class MozillaWebStore {
         const response = await fetch(
             `${this.rootURL}/api/v5/addons/upload/${uuid}/`,
             {
-                method:"GET",
-                headers:hdr
+                method: "GET",
+                headers: hdr
             }
-        )
-        const resp_body = await response.json()
+        );
+        const resp_body = await response.json();
         if (!response.ok) {
             throw new Error(`Invalid response: ${response.statusText}, ` +
-                `${JSON.stringify(resp_body)}`)
+                `${JSON.stringify(resp_body)}`);
         }
-        return resp_body
+        return resp_body;
     }
 
     /**
@@ -109,15 +109,16 @@ export class MozillaWebStore {
      * @param uuid UUID of upload
      * @param srcfile (Optional) srcfile
      */
-    async createNewVersion(uuid:string, srcfile?: fs.ReadStream | string):Promise<any> {
-        const formData = new FormData()
-        if (srcfile && typeof(srcfile) === "string") {
-            formData.append("source", fs.createReadStream(srcfile))
+    async createNewVersion(uuid: string, srcfile?: fs.ReadStream | string): Promise<any> {
+        const formData = new FormData();
+        if (srcfile && typeof (srcfile) === "string") {
+            formData.append("source", fs.createReadStream(srcfile));
         } else if (srcfile) {
-            formData.append("source", srcfile)
+            formData.append("source", srcfile);
         } else {
-            formData.append("source","")
+            formData.append("source", "");
         }
+        formData.append("upload", uuid);
         const hdr = await this.setHeaders();
         const res = await fetch(
             `${this.rootURL}/api/v5/addons/addon/${this.extensionId}/versions/`,
@@ -127,12 +128,12 @@ export class MozillaWebStore {
                 body: formData
             }
         );
-        const resp_body = await res.json()
+        const resp_body = await res.json();
         if (!res.ok) {
             throw new Error(`Invalid response: ${res.statusText}, ` +
-                `${JSON.stringify(resp_body)}`)
+                `${JSON.stringify(resp_body)}`);
         }
-        return resp_body
+        return resp_body;
     }
 
     /**
