@@ -1,5 +1,5 @@
 {
-  "name": "firefox-extension-publish",
+  "name": "webstore-firefox",
   "version": "1.0.0",
   "private": true,
   "description": "Publish webextension to Firefox.",

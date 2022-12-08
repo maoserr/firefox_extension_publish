@@ -19,7 +19,7 @@ inputs:
     description: 'Zip file for source upload'
 runs:
   using: 'node16'
-  main: '../dist/index.js'
+  main: './dist/index.js'
 branding:
   icon: 'bookmark'
   color: 'orange'
