@@ -14157,6 +14157,150 @@ var __webpack_exports__ = {};
 
 // EXTERNAL MODULE: ./node_modules/@actions/core/lib/core.js
 var core = __nccwpck_require__(2186);
+;// CONCATENATED MODULE: ./lib/get_inputs.js
+
+/**
+ * Gets input for this action from Actions API
+ */
+function getWebStoreInputs() {
+    const inp = {
+        extensionId: core.getInput("firefox_extension_id", { required: true }),
+        apiKey: core.getInput("api_key", { required: true }),
+        apiSecret: core.getInput("api_secret", { required: true }),
+        file: core.getInput("file", { required: true }),
+        srcFile: core.getInput("src_file")
+    };
+    return inp;
+}
+
+// EXTERNAL MODULE: external "fs"
+var external_fs_ = __nccwpck_require__(7147);
+;// CONCATENATED MODULE: ./node_modules/webextension-store/dist/chrome_webstore.js
+
+
+/**
+ * API Client for Chrome Web Store
+ */
+class ChromeWebStore {
+    extensionId;
+    clientId;
+    refreshToken;
+    clientSecret;
+    rootURL = "https://www.googleapis.com";
+    token;
+    /**
+     * Creates a new instance of the webstore
+     * @param extensionId Extension ID
+     * @param clientId Client ID
+     * @param refreshToken Refresh Token
+     * @param clientSecret (Optional) Client Secret
+     */
+    constructor(extensionId, clientId, refreshToken, clientSecret) {
+        this.extensionId = extensionId;
+        this.clientId = clientId;
+        this.refreshToken = refreshToken;
+        if (clientSecret) {
+            this.clientSecret = clientSecret;
+        }
+    }
+    /**
+     * Uploads to an existing extension
+     * @param file File to upload
+     */
+    async uploadExisting(file) {
+        const hdr = await this.setHeaders();
+        let readStream;
+        if (typeof file === "string") {
+            readStream = fs.createReadStream(file);
+        }
+        else {
+            readStream = file;
+        }
+        const resp = await fetch(`${this.rootURL}/upload/chromewebstore/v1.1/items/${this.extensionId}`, {
+            method: "PUT",
+            headers: hdr,
+            body: readStream
+        });
+        const resp_body = await resp.json();
+        if (!resp.ok) {
+            throw new Error(`Invalid response: ${resp.statusText}, ` +
+                `${JSON.stringify(resp_body)}`);
+        }
+        return resp_body;
+    }
+    /**
+     * Publish the extension
+     * @param target Target group
+     */
+    async publish(target = "default") {
+        const response = await fetch(`${this.rootURL}/chromewebstore/v1.1/items/` +
+            `${this.extensionId}/publish?publishTarget=${target}`, {
+            method: "POST",
+            headers: await this.setHeaders()
+        });
+        const resp_body = await response.json();
+        if (!response.ok) {
+            throw new Error(`Invalid response: ${response.statusText}, ` +
+                `${JSON.stringify(resp_body)}`);
+        }
+        return resp_body;
+    }
+    /**
+     * Gets an extension's info
+     * @param projection
+     */
+    async get(projection = "DRAFT") {
+        const hdr = await this.setHeaders();
+        const res = await fetch(`${this.rootURL}/chromewebstore/v1.1/items/` +
+            `${this.extensionId}?projection=${projection}`, {
+            method: "GET",
+            headers: hdr
+        });
+        return res.json();
+    }
+    /**
+     * Clears token
+     */
+    clearToken() {
+        this.token = undefined;
+    }
+    /**
+     * Check if a new token is needed
+     * @private
+     */
+    async checkToken() {
+        if (this.token) {
+            return this.token;
+        }
+        const refreshTokenURI = "https://www.googleapis.com/oauth2/v4/token";
+        let json = {
+            client_id: this.clientId,
+            refresh_token: this.refreshToken,
+            grant_type: "refresh_token"
+        };
+        if (this.clientSecret) {
+            json.client_secret = this.clientSecret;
+        }
+        const response = await fetch(refreshTokenURI, { method: "POST", body: JSON.stringify(json) });
+        const resp_body = await response.json();
+        this.token = resp_body.access_token;
+        return this.token;
+    }
+    /**
+     * Sets header for any API calls
+     * @private
+     */
+    async setHeaders() {
+        await this.checkToken().then();
+        return {
+            Authorization: `Bearer ${this.token}`,
+            "x-goog-api-version": "2"
+        };
+    }
+}
+
+// EXTERNAL MODULE: ./node_modules/jsonwebtoken/index.js
+var jsonwebtoken = __nccwpck_require__(7486);
 ;// CONCATENATED MODULE: external "node:http"
 const external_node_http_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:http");
 ;// CONCATENATED MODULE: external "node:https"
@@ -15935,7 +16079,7 @@ const supportedSchemas = new Set(['data:', 'http:', 'https:']);
  * @param   {*} [options_] - Fetch options
  * @return  {Promise<import('./response').default>}
  */
-async function fetch(url, options_) {
+async function src_fetch(url, options_) {
 	return new Promise((resolve, reject) => {
 		// Build request object
 		const request = new Request(url, options_);
@@ -16123,7 +16267,7 @@ async function fetch(url, options_) {
 						}
 
 						// HTTP-redirect fetch step 15
-						resolve(fetch(new Request(locationURL, requestOptions)));
+						resolve(src_fetch(new Request(locationURL, requestOptions)));
 						finalize();
 						return;
 					}
@@ -16306,168 +16450,9 @@ function fixResponseChunkedTransferBadEnding(request, errorCallback) {
 	});
 }
 
-// EXTERNAL MODULE: external "fs"
-var external_fs_ = __nccwpck_require__(7147);
-;// CONCATENATED MODULE: ./lib/chrome_webstore.js
-
-
-/**
- * API Client for Chrome Web Store
- */
-class ChromeWebStore {
-    extensionId;
-    clientId;
-    refreshToken;
-    clientSecret;
-    rootURL = "https://www.googleapis.com";
-    token;
-    /**
-     * Creates a new instance of the webstore
-     * @param extensionId Extension ID
-     * @param clientId Client ID
-     * @param refreshToken Refresh Token
-     * @param clientSecret (Optional) Client Secret
-     */
-    constructor(extensionId, clientId, refreshToken, clientSecret) {
-        this.extensionId = extensionId;
-        this.clientId = clientId;
-        this.refreshToken = refreshToken;
-        if (clientSecret) {
-            this.clientSecret = clientSecret;
-        }
-    }
-    /**
-     * Uploads to an existing extension
-     * @param file File to upload
-     */
-    async uploadExisting(file) {
-        const hdr = await this.setHeaders();
-        let readStream;
-        if (typeof file === "string") {
-            readStream = external_fs_.createReadStream(file);
-        }
-        else {
-            readStream = file;
-        }
-        const resp = await fetch(`${this.rootURL}/upload/chromewebstore/v1.1/items/${this.extensionId}`, {
-            method: "PUT",
-            headers: hdr,
-            body: readStream
-        });
-        const resp_body = await resp.json();
-        if (!resp.ok) {
-            throw new Error(`Invalid response: ${resp.statusText}, ` +
-                `${JSON.stringify(resp_body)}`);
-        }
-        return resp_body;
-    }
-    /**
-     * Publish the extension
-     * @param target Target group
-     */
-    async publish(target = "default") {
-        const response = await fetch(`${this.rootURL}/chromewebstore/v1.1/items/` +
-            `${this.extensionId}/publish?publishTarget=${target}`, {
-            method: "POST",
-            headers: await this.setHeaders()
-        });
-        const resp_body = await response.json();
-        if (!response.ok) {
-            throw new Error(`Invalid response: ${response.statusText}, ` +
-                `${JSON.stringify(resp_body)}`);
-        }
-        return resp_body;
-    }
-    /**
-     * Gets an extension's info
-     * @param projection
-     */
-    async get(projection = "DRAFT") {
-        const hdr = await this.setHeaders();
-        const res = await fetch(`${this.rootURL}/chromewebstore/v1.1/items/` +
-            `${this.extensionId}?projection=${projection}`, {
-            method: "GET",
-            headers: hdr
-        });
-        return res.json();
-    }
-    /**
-     * Clears token
-     */
-    clearToken() {
-        this.token = undefined;
-    }
-    /**
-     * Check if a new token is needed
-     * @private
-     */
-    async checkToken() {
-        if (this.token) {
-            return this.token;
-        }
-        const refreshTokenURI = "https://www.googleapis.com/oauth2/v4/token";
-        let json = {
-            client_id: this.clientId,
-            refresh_token: this.refreshToken,
-            grant_type: "refresh_token"
-        };
-        if (this.clientSecret) {
-            json.client_secret = this.clientSecret;
-        }
-        const response = await fetch(refreshTokenURI, { method: "POST", body: JSON.stringify(json) });
-        const resp_body = await response.json();
-        this.token = resp_body.access_token;
-        return this.token;
-    }
-    /**
-     * Sets header for any API calls
-     * @private
-     */
-    async setHeaders() {
-        await this.checkToken().then();
-        return {
-            Authorization: `Bearer ${this.token}`,
-            "x-goog-api-version": "2"
-        };
-    }
-}
-
-;// CONCATENATED MODULE: ./lib/get_inputs.js
-
-/**
- * Gets input for this action from Actions API
- */
-function getWebStoreInputs() {
-    let inp = {};
-    const chrome_id = core.getInput("chrome_extension_id");
-    if (chrome_id) {
-        inp.chrome = {
-            extensionId: chrome_id,
-            clientId: core.getInput("client_id", { required: true }),
-            refreshToken: core.getInput("refresh_token", { required: true }),
-            clientSecret: core.getInput("client_secret", { required: true }),
-            file: core.getInput("file", { required: true }),
-            publish: core.getBooleanInput("publish")
-        };
-    }
-    const ff_id = core.getInput("firefox_extension_id");
-    if (ff_id) {
-        inp.firefox = {
-            extensionId: ff_id,
-            apiKey: core.getInput("api_key"),
-            apiSecret: core.getInput("api_secret"),
-            file: core.getInput("file"),
-            srcFile: core.getInput("src_file")
-        };
-    }
-    return inp;
-}
-
-// EXTERNAL MODULE: ./node_modules/jsonwebtoken/index.js
-var jsonwebtoken = __nccwpck_require__(7486);
 // EXTERNAL MODULE: ./node_modules/form-data/lib/form_data.js
 var form_data = __nccwpck_require__(4334);
-;// CONCATENATED MODULE: ./lib/mozilla_webstore.js
+;// CONCATENATED MODULE: ./node_modules/webextension-store/dist/mozilla_webstore.js
 
 
 
@@ -16504,7 +16489,7 @@ class MozillaWebStore {
         }
         formData.append("channel", channel);
         const hdr = await this.setHeaders();
-        const res = await fetch(`${this.rootURL}/api/v5/addons/upload/`, { method: "POST", headers: hdr, body: formData });
+        const res = await src_fetch(`${this.rootURL}/api/v5/addons/upload/`, { method: "POST", headers: hdr, body: formData });
         const resp_body = await res.json();
         if (!res.ok) {
             throw new Error(`Invalid response: ${res.statusText}, ` +
@@ -16545,7 +16530,7 @@ class MozillaWebStore {
      */
     async checkPackage(uuid) {
         const hdr = await this.setHeaders();
-        const response = await fetch(`${this.rootURL}/api/v5/addons/upload/${uuid}/`, {
+        const response = await src_fetch(`${this.rootURL}/api/v5/addons/upload/${uuid}/`, {
             method: "GET",
             headers: hdr
         });
@@ -16573,7 +16558,7 @@ class MozillaWebStore {
             formData.append("source", "");
         }
         const hdr = await this.setHeaders();
-        const res = await fetch(`${this.rootURL}/api/v5/addons/addon/${this.extensionId}/versions/`, {
+        const res = await src_fetch(`${this.rootURL}/api/v5/addons/addon/${this.extensionId}/versions/`, {
             method: "POST",
             headers: hdr,
             body: formData
@@ -16613,31 +16598,15 @@ class MozillaWebStore {
     }
 }
 
+;// CONCATENATED MODULE: ./node_modules/webextension-store/dist/index.js
+
+
+
+
 ;// CONCATENATED MODULE: ./lib/main.js
 
 
 
-
-/**
- * Runs the Chrome store logic
- * @param inp Chrome Store inputs
- */
-async function runChrome(inp) {
-    try {
-        core.info(`Uploading Chrome extension ${inp.extensionId}...`);
-        const store = new ChromeWebStore(inp.extensionId, inp.clientId, inp.refreshToken, inp.clientSecret);
-        const chrome_res = await store.uploadExisting(inp.file);
-        core.info(JSON.stringify(chrome_res));
-        if (inp.publish) {
-            const publish_res = await store.publish();
-            core.info(JSON.stringify(publish_res));
-        }
-    }
-    catch (error) {
-        if (error instanceof Error)
-            core.setFailed(error.message);
-    }
-}
 /**
  * Runs the Firefox store logic
  * @param inp
@@ -16660,20 +16629,13 @@ async function runFirefox(inp) {
  * Run all
  */
 async function run() {
+    if (core.getInput("test")) {
+        core.info("Skipping workflow due to test flag");
+        return;
+    }
     core.info("Running webstore upload workflow.");
     const inputs = getWebStoreInputs();
-    if (inputs.chrome) {
-        await runChrome(inputs.chrome);
-    }
-    else {
-        core.info("No Chrome extension ID specified, skipping Chrome...");
-    }
-    if (inputs.firefox) {
-        await runFirefox(inputs.firefox);
-    }
-    else {
-        core.info("No Firefox extension ID specified, skipping Firefox...");
-    }
+    await runFirefox(inputs);
 }
 run().then();
 
