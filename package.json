@@ -26,7 +26,7 @@
   "license": "MIT",
   "dependencies": {
     "@actions/core": "^1.10.0",
-    "webextension-store": "^1.0.1"
+    "webextension-store": "^1.1.6"
   },
   "devDependencies": {
     "@types/jsonwebtoken": "^8.5.9",
