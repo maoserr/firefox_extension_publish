@@ -29,7 +29,7 @@
     "webextension-store": "^1.1.6"
   },
   "devDependencies": {
-    "@types/jsonwebtoken": "^9.0.3",
+    "@types/jsonwebtoken": "^9.0.4",
     "@types/node": "^20.8.6",
     "@typescript-eslint/parser": "^5.62.0",
     "@vercel/ncc": "^0.38.0",
